@@ -1,0 +1,17 @@
+.venv/
+.env
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+data/
+runs/**
+!runs/**/
+!runs/**/pairs.yaml
+logs/
+state/
+exports/
+.streamlit/secrets.toml
+
+# Τρίτων, δεν ανεβαίνουν (το legacy/ περιέχει ήδη τον κώδικα του zip)
+ssrn-6188418.pdf
+CryptoPairTrading-main.zip

@@ -1,0 +1,31 @@
+# Dashboard look (python -m cryptopairs dashboard runs Streamlit from the project folder).
+# Dark "trading desk" theme; the colours match cryptopairs/ui/theme.py.
+
+[server]
+# Serves cryptopairs/static (plotly.js for the live charts, copied there on start-up).
+enableStaticServing = true
+
+[theme]
+base = "dark"
+primaryColor = "#f0b429"
+backgroundColor = "#0b0e14"
+secondaryBackgroundColor = "#131925"
+textColor = "#d7dce5"
+borderColor = "#232b3a"
+dataframeBorderColor = "#1d2431"
+dataframeHeaderBackgroundColor = "#111622"
+showWidgetBorder = true
+baseRadius = "6px"
+font = "sans-serif"
+codeFont = "monospace"
+linkColor = "#5b9cff"
+greenColor = "#2ebd85"
+redColor = "#f6465d"
+blueColor = "#5b9cff"
+orangeColor = "#f0b429"
+chartCategoricalColors = ["#5b9cff", "#f0b429", "#2ebd85", "#f6465d", "#a78bfa", "#22d3ee", "#f472b6", "#94a3b8"]
+
+[theme.sidebar]
+backgroundColor = "#0f131c"
+secondaryBackgroundColor = "#161c29"
+borderColor = "#1f2735"

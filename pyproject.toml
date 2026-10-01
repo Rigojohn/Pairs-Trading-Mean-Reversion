@@ -1,0 +1,25 @@
+[project]
+name = "cryptopairs"
+version = "0.2.0"
+description = "Crypto pairs trading bot (Stoikov et al. 2025): research, paper and live trading"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "ccxt>=4.3",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "statsmodels>=0.14"]  # statsmodels only for the legacy parity test
+
+[project.scripts]
+cryptopairs = "cryptopairs.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cryptopairs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]

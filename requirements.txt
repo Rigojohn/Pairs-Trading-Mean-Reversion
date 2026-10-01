@@ -1,0 +1,8 @@
+# Versions verified in this project's .venv (Python 3.12).
+numpy==2.5.3
+pandas==3.0.6
+ccxt==4.5.85
+PyYAML==6.0.3
+# tests
+pytest==9.1.1
+statsmodels==0.15.0

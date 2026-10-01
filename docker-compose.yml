@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: cryptopairs:latest
+    container_name: cryptopairs
+    # Restart after a crash or a server reboot; `docker compose stop` stops it for good.
+    restart: unless-stopped
+    command: ["--profile", "kalman", "paper", "--pairs", "runs/kalman/pairs.yaml"]
+    volumes:
+      - ./state:/app/state            # SQLite state: survives restarts and image rebuilds
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - ./runs/kalman:/app/runs/kalman:ro
+    environment:
+      - TZ=UTC
+    # Give the bot time to finish an order and save its state on shutdown.
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

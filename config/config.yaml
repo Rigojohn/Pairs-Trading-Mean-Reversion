@@ -1,0 +1,136 @@
+# CryptoPairsBot configuration.
+# Base values reproduce the paper (Stoikov et al. 2025). Select an overlay with
+#   python -m cryptopairs --profile hardened <command>
+profile: strict
+
+data:
+  dir: data
+  quote: USDT
+  interval: 1h
+  download_threads: 8
+
+strategy:
+  leverage: 5.0                    # paper: 5x (margin rate 0.20)
+  refit_every: 1                   # refit each closed bar while flat; frozen in a position
+  allow_same_bar_reentry: false    # Algorithm 1 never exits and re-enters on one bar
+  stop_loss_pct: 0.20              # gamma_SL
+  cooldown_hours: 120              # Delta_cool = 5 days
+  deactivation_mode: equity_floor  # Algorithm 1: no new entries once equity <= 0.20 * initial
+  deactivation_threshold: 0.20     # gamma_DE (see the hardened profile for a tighter rule)
+  beta_min: 0.05                   # bug fix: never trade a non-positive hedge ratio
+  beta_max: 20.0
+  catastrophe_stop_pct: null       # overlay: intrabar emergency stop (off in the paper)
+  max_holding_bars: null           # overlay: time stop (off in the paper)
+  min_edge_cost_multiple: null     # overlay: cost-aware entry gate (off in the paper)
+
+costs:
+  taker_fee: 0.0005                # gamma_fee = 5 bps
+  half_spread_bps: 0.0
+  slippage_bps: 0.0
+  funding: false
+  fill_on: close                   # paper fills at the signal bar's close
+  intrabar_stop: false
+
+research:
+  test_start: "2026-03-01"         # validation window (paper: ~7 months)
+  test_end: "2026-09-30 23:00"
+  funnel_days: 800                 # paper Sec 4.2
+  calibration_days: 730            # paper Sec 6.2 (2 years)
+  min_history_days: 1000           # Filter 1
+  same_chain: true                 # Filter 2 (needs: python -m cryptopairs metadata)
+  unknown_chain_policy: exclude
+  min_corr_logp: 0.9               # Filter 3
+  min_corr_ret: 0.5
+  ic_lookbacks: [168, 720, 2160, 4320]          # Filter 4: T1 = 7d, 1M, 3M, 6M
+  ic_horizons: [1, 3, 6, 12, 24, 72, 168]       # T2 = 1h ... 7d
+  top_n: 100
+  grid_lookback: [168, 360, 720, 2160, 4320]    # L = 7d, 15d, 1M, 3M, 6M
+  grid_z_entry: [0.8, 1.0, 1.5, 2.0, 2.5, 3.0]
+  grid_z_exit: [0.0, 0.5]
+  min_train_trades: 0
+  initial_capital: 1000000
+  workers: 3                       # CPU processes for calibration (leave one core free)
+  runs_dir: runs
+
+risk:
+  max_open_pairs: 50
+  max_symbol_gross_leverage: 2.0   # gross notional in one coin across pairs / total equity
+  portfolio_max_drawdown: 0.25     # kill switch: no new entries beyond this drawdown
+  flatten_on_kill: false
+  continuous_stop: false           # paper: stops are checked at bar close only
+  stop_check_seconds: 5
+  require_quotes_for_entry: true
+
+runtime:
+  mode: paper                      # live arrives in Phase 3
+  exchange: binanceusdm
+  pairs_file: runs/latest/pairs.yaml
+  capital_per_pair: 100            # virtual USDT per pair in paper mode
+  bar_grace_seconds: 5
+  quote_stale_seconds: 45          # quotes older than this are not used for entries
+  quote_snapshot_seconds: 20       # REST refresh of all books (quiet symbols rarely stream)
+  max_rest_concurrency: 4
+  execution: taker                 # taker | maker_first (see the kalman profile)
+  maker_timeout_seconds: 300       # maker_first: take the rest with market orders after this
+  maker_reprice_seconds: 10        # move the resting order to the new best price at most this often
+  maker_poll_seconds: 2
+  log_dir: logs
+  live_snapshot_seconds: 5         # equity + spread/Z/PnL per pair at live prices, for the dashboard
+  live_retention_hours: 24         # older live snapshots are deleted (hourly history is kept)
+  command_poll_seconds: 2          # dashboard buttons are picked up within this time
+  command_max_age_seconds: 120     # older button clicks (bot was down) are rejected
+  evaluate_on_start: true          # act on the last closed bar at start-up (live quotes)
+  state_dir: state                 # SQLite state: state/paper.db (and later state/live.db)
+
+profiles:
+  strict: {}
+  hardened:                        # crypto adaptations; evidence: runs analysed on 2026-10-01
+    strategy:
+      leverage: 2.0                  # at 5x the 20% stop sits inside normal noise (44% of trades stopped)
+      catastrophe_stop_pct: 0.35     # intrabar emergency stop against hourly gaps (BAND +28% in 1h)
+      min_edge_cost_multiple: 1.5
+    costs:
+      half_spread_bps: 5
+      slippage_bps: 5
+      funding: true
+      fill_on: next_open
+      intrabar_stop: false           # a 20% intrabar stop whipsaws; the catastrophe stop covers gaps
+    research:
+      min_train_trades: 5
+  kalman:                          # K1: hardened + Kalman-filter spread (fixed sigma, 2026-10-01 rerun)
+    strategy:                      # chosen on validation by the pre-registered rule, confirmed on test
+      leverage: 2.0
+      catastrophe_stop_pct: 0.35
+      min_edge_cost_multiple: 1.5
+      estimator: kalman
+      max_entry_z: 10.0              # no entries on broken relationships / frozen prices
+    costs:
+      half_spread_bps: 5
+      slippage_bps: 5
+      funding: true
+      fill_on: next_open
+      intrabar_stop: false
+      maker_legs: 1                  # one leg as a maker order (stops stay taker)
+    research:
+      min_train_trades: 5
+    runtime:
+      execution: maker_first         # post-only on the larger leg, hedge each fill, market after timeout
+  kalman_ts:                       # K2: as kalman plus a 3-half-life time stop
+    strategy:
+      leverage: 2.0
+      catastrophe_stop_pct: 0.35
+      min_edge_cost_multiple: 1.5
+      estimator: kalman
+      max_entry_z: 10.0
+      time_stop_halflives: 3.0
+    costs:
+      half_spread_bps: 5
+      slippage_bps: 5
+      funding: true
+      fill_on: next_open
+      intrabar_stop: false
+      maker_legs: 1
+    research:
+      min_train_trades: 5
+    runtime:
+      execution: maker_first

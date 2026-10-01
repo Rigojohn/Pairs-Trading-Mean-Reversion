@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import logging
 import math
@@ -164,17 +165,42 @@ def cmd_backtest(cfg: AppConfig, args) -> None:
         print(f"trades -> {args.trades}")
 
 
+def resolve_pairs_file(cfg: AppConfig, given: str | None) -> str:
+    """The pairs file to trade: --pairs, else runs/<profile>/pairs.yaml, else runtime.pairs_file.
+
+    A missing file stops here with the closest match, before anything is opened or recorded.
+    """
+    runs = Path(cfg.research.runs_dir)
+    if given is None:
+        own = runs / cfg.profile / "pairs.yaml"
+        given = str(own) if own.exists() else cfg.runtime.pairs_file
+    if not Path(given).is_file():
+        available = sorted(str(p) for p in runs.glob("*/pairs.yaml"))
+        guess = difflib.get_close_matches(given, available, n=1, cutoff=0.6)
+        raise SystemExit(f"pairs file not found: {given}"
+                         + (f"\n  did you mean:  {guess[0]}" if guess else "")
+                         + ("\n  available:     " + "\n                 ".join(available) if available else ""))
+    return given
+
+
 def cmd_paper(cfg: AppConfig, args) -> None:
     from cryptopairs.runtime.app import archive_state, run_app
 
-    if args.pairs:
-        cfg.runtime.pairs_file = args.pairs
+    cfg.runtime.pairs_file = resolve_pairs_file(cfg, args.pairs)
+    log.info("pairs file: %s", cfg.runtime.pairs_file)
     cfg.runtime.mode = "paper"
     if args.fresh:
         old = archive_state(cfg)
         if old is not None:
             log.info("previous paper state archived to %s; starting fresh", old)
-    asyncio.run(run_app(cfg))
+    try:
+        asyncio.run(run_app(cfg))
+    except KeyboardInterrupt:  # Ctrl+C before the signal handlers were installed (start-up)
+        log.warning("stopped by Ctrl+C during start-up")
+    except BaseException as exc:  # the reason goes to the log file, not only to the terminal
+        if not isinstance(exc, SystemExit) or exc.code not in (0, None):
+            log.exception("the bot stopped because of an error")
+        raise
 
 
 def _open_store(cfg: AppConfig, mode: str):
@@ -284,7 +310,8 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--trades", help="write trades to this CSV")
 
     pp = sub.add_parser("paper", help="run the paper-trading bot on live market data")
-    pp.add_argument("--pairs", help="pairs.yaml (default: runtime.pairs_file)")
+    pp.add_argument("--pairs", help="pairs.yaml (default: runs/<profile>/pairs.yaml if it exists, "
+                                    "else runtime.pairs_file)")
     pp.add_argument("--fresh", action="store_true", help="archive the saved paper state and start over")
     pp.add_argument("--name", help="bot name: state/<name>.db and logs/<name>.log (default: paper)")
 

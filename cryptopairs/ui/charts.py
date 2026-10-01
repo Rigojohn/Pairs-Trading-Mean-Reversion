@@ -13,8 +13,8 @@ HOUR = 3_600_000
 
 # How each signal is drawn: (symbol, colour, legend name). What-if markers use the open variant.
 MARKERS = {
-    "long": ("triangle-up", GREEN, "BUY spread (long A / short B)"),
-    "short": ("triangle-down", RED, "SELL spread (short A / long B)"),
+    "long": ("triangle-up", GREEN, "BUY spread"),  # long A / short B
+    "short": ("triangle-down", RED, "SELL spread"),  # short A / long B
     "exit": ("circle", TEXT, "CLOSE"),
     "stop": ("x", AMBER, "STOP"),
 }
@@ -59,7 +59,7 @@ def equity_chart(curve: pd.Series, capital: float, height: int = 380) -> go.Figu
     fig.add_trace(go.Scatter(x=curve.index, y=curve, name="equity", line=dict(color=GREEN if up else RED, width=2),
                              hovertemplate="%{y:,.2f}<extra>equity</extra>"), 1, 1)
     fig.add_hline(y=capital, line=dict(color=MUTED, dash="dot", width=1), row=1, col=1,
-                  annotation_text="capital", annotation_font_color=MUTED, annotation_position="bottom left")
+                  annotation_text="capital", annotation_font_color=MUTED, annotation_position="top right")
     fig.add_trace(go.Scatter(x=dd.index, y=dd, name="drawdown %", fill="tozeroy", fillcolor=_rgba(RED, 0.18),
                              line=dict(color=RED, width=1), hovertemplate="%{y:.2f}%<extra>drawdown</extra>"), 2, 1)
     fig.update_yaxes(title_text="USDT", row=1, col=1)
@@ -73,13 +73,13 @@ def pnl_by_pair(rows: pd.DataFrame, height: int = 380) -> go.Figure:
     open_pnl = t["unrealized"]
     realized = t["PnL"] - open_pnl  # closed trades plus fees/funding already paid on the open one
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=t["pair"], x=realized, orientation="h", name="realized (incl. fees, funding)",
+    fig.add_trace(go.Bar(y=t["pair"], x=realized, orientation="h", name="realized",
                          marker_color=[_rgba(GREEN if v >= 0 else RED, 0.85) for v in realized]))
-    fig.add_trace(go.Bar(y=t["pair"], x=open_pnl, orientation="h", name="open (unrealized)",
+    fig.add_trace(go.Bar(y=t["pair"], x=open_pnl, orientation="h", name="open",
                          marker_color=[_rgba(GREEN if v >= 0 else RED, 0.35) for v in open_pnl],
                          marker_line=dict(color=[GREEN if v >= 0 else RED for v in open_pnl], width=1)))
-    fig.update_layout(barmode="relative", height=height, hovermode="y unified", xaxis_title="USDT",
-                      margin=dict(l=10, r=10, t=30, b=10))
+    fig.update_layout(barmode="relative", height=height, hovermode="y unified",
+                      legend=dict(y=-0.08, yanchor="top", x=0.5, xanchor="center"), margin=dict(l=10, r=10, t=10, b=10))
     return fig
 
 
@@ -108,7 +108,7 @@ def prices_chart(fit: pd.DataFrame, live: pd.DataFrame, a: str, b: str, spans: l
             fig.add_trace(go.Scatter(x=tl, y=100 * live["mid_b"] / base_b, name=f"{b} live", mode="lines",
                                      line=dict(color=LEG_B, width=1, dash="dot"), showlegend=False))
     _shade_positions(fig, spans, rows=None)
-    fig.update_layout(height=height, yaxis_title="rebased = 100", margin=dict(l=10, r=10, t=30, b=10))
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
     return fig
 
 
@@ -145,7 +145,11 @@ def z_chart(fit: pd.DataFrame, live: pd.DataFrame, spans: list[tuple], trades: p
     _shade_positions(fig, spans, rows=None)
     _markers(fig, trades)
     _markers(fig, sim, what_if=True)
-    zmax = np.nanmax(np.abs(fit["z"])) if not fit.empty and fit["z"].notna().any() else 3.0
+    zs = [fit["z"].to_numpy(dtype=float)] if not fit.empty else []
+    if not live.empty:
+        zs.append(((live["z_buy"] + live["z_sell"]) / 2).to_numpy(dtype=float))
+    zall = np.concatenate(zs) if zs else np.empty(0)
+    zmax = float(np.nanmax(np.abs(zall))) if np.isfinite(zall).any() else 3.0
     lim = max(ze, (what_if or in_use)[0]) * 1.25
     fig.update_yaxes(range=[-max(zmax, lim) * 1.08, max(zmax, lim) * 1.08], title_text="Z")
     fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
@@ -244,4 +248,79 @@ def surface_heatmap(df: pd.DataFrame, marks: dict[str, tuple[float, float]], hei
                                                  color=AMBER if name.startswith("what") else TEXT)))
     fig.update_layout(height=height, xaxis_title="z_entry", yaxis_title="z_exit", hovermode="closest",
                       margin=dict(l=10, r=10, t=30, b=10))
+    return fig
+
+
+# --------------------------------------------------------------- live (intraday)
+def _with_gaps(df: pd.DataFrame, max_gap_ms: int = 30_000) -> pd.DataFrame:
+    """Insert an empty row where marks are missing (bot down), so lines break instead of bridging it."""
+    if len(df) < 2:
+        return df
+    gaps = df["ts"].diff() > max_gap_ms
+    if not gaps.any():
+        return df
+    blank = pd.DataFrame({"ts": df.loc[gaps, "ts"] - 1})  # just before the first mark after the gap
+    return pd.concat([df, blank]).sort_values("ts", kind="stable", ignore_index=True)  # other columns: NaN
+
+
+def _last_minutes(minutes: int) -> tuple[pd.Timestamp, pd.Timestamp]:
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    return now - pd.Timedelta(minutes=minutes), now + pd.Timedelta(seconds=20)
+
+
+def live_pair_chart(live: pd.DataFrame, a: str, b: str, z_entry: float, z_exit: float, minutes: int = 60,
+                    height: int = 400) -> go.Figure:
+    """The last hour at the bot's 5-second marks: both legs (% move) and the Z the position trades on."""
+    x0, x1 = _last_minutes(minutes)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.45, 0.55], vertical_spacing=0.06)
+    if not live.empty:
+        t = _t(live["ts"])
+        win = _with_gaps(live[t >= x0])
+        if len(win):
+            tw = _t(win["ts"])
+            for col, name, color in (("mid_a", a, LEG_A), ("mid_b", b, LEG_B)):
+                ref = win[col].dropna().iloc[0]
+                fig.add_trace(go.Scatter(x=tw, y=100 * (win[col] / ref - 1), name=f"{name} %", mode="lines",
+                                         line=dict(color=color, width=1.6, shape="hv"),
+                                         hovertemplate="%{y:+.3f}%<extra>" + name + "</extra>"), 1, 1)
+            z = (win["z_buy"] + win["z_sell"]) / 2
+            fig.add_trace(go.Scatter(x=tw, y=z, name="Z live", mode="lines", line=dict(color=CYAN, width=1.8, shape="hv"),
+                                     hovertemplate="Z %{y:+.3f}<extra></extra>"), 2, 1)
+            z_last = float(z.dropna().iloc[-1]) if z.notna().any() else np.nan
+            fig.add_trace(go.Scatter(x=[tw.iloc[-1]], y=[z_last], mode="markers+text", showlegend=False,
+                                     marker=dict(color=CYAN, size=9), text=[f" {z_last:+.2f}"],
+                                     textposition="middle right", textfont=dict(color=CYAN), hoverinfo="skip"), 2, 1)
+    for sgn in (1, -1):
+        fig.add_hline(y=sgn * z_entry, line=dict(color=RED, dash="dash", width=1), row=2, col=1)
+        fig.add_hline(y=sgn * z_exit, line=dict(color=GREEN, dash="dot", width=1), row=2, col=1)
+    fig.add_hline(y=0, line=dict(color=BORDER, width=1), row=1, col=1)
+    fig.update_xaxes(range=[x0, x1])
+    fig.update_yaxes(title_text="move %", row=1, col=1)
+    fig.update_yaxes(title_text="Z", row=2, col=1)
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
+    return fig
+
+
+def live_equity_chart(equity_live: pd.DataFrame, capital: float, minutes: int = 60, height: int = 230) -> go.Figure:
+    """Total equity over the last hour at the bot's 5-second marks."""
+    x0, x1 = _last_minutes(minutes)
+    fig = go.Figure()
+    if not equity_live.empty:
+        t = _t(equity_live["ts"])
+        win = _with_gaps(equity_live[t >= x0])
+        if len(win):
+            tw = _t(win["ts"])
+            last = float(win["equity"].dropna().iloc[-1])
+            color = GREEN if last >= capital else RED
+            fig.add_trace(go.Scatter(x=tw, y=win["equity"], mode="lines", name="equity", fill="tozeroy",
+                                     fillcolor=_rgba(color, 0.08), line=dict(color=color, width=1.8, shape="hv"),
+                                     hovertemplate="%{y:,.2f}<extra>equity</extra>"))
+            fig.add_trace(go.Scatter(x=[tw.iloc[-1]], y=[last], mode="markers+text", marker=dict(color=color, size=8),
+                                     text=[f" {last:,.2f}"], textposition="middle right", textfont=dict(color=color),
+                                     hoverinfo="skip", showlegend=False))
+            lo, hi = float(win["equity"].min()), float(win["equity"].max())
+            pad = max((hi - lo) * 0.15, 0.05)
+            fig.update_yaxes(range=[lo - pad, hi + pad])
+    fig.update_xaxes(range=[x0, x1])
+    fig.update_layout(height=height, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
     return fig

@@ -226,7 +226,7 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
     assert not at.exception, at.exception
     labels = {m.label for m in at.metric}
     expected = {
-        "overview": {"Bot", "Equity", "Daily PnL", "Open", "Sharpe (7d)", "Max DD (7d)", "Status"},
+        "overview": {"Bot", "Equity", "Daily PnL", "Open pairs", "Sharpe 7d", "Max DD 7d", "Status"},
         "pair": {"Position", "Unrealized", "Z now", "β in use"},
         "backtest": {"Sharpe · calibrated", "Total return · calibrated", "Trades · calibrated"},
         "executions": {"Executions", "Maker share"},
@@ -284,7 +284,8 @@ def test_heartbeat_marks_a_stale_bot(tmp_path, monkeypatch):
     pytest.importorskip("streamlit")
     _populated(tmp_path)  # snapshots were written with the test's fake clock (years ago)
     at = _app(tmp_path, monkeypatch).run()
-    assert next(m for m in at.metric if m.label == "Bot").value == "STALE"
+    assert next(m for m in at.metric if m.label == "Bot").value == "DOWN"
+    assert any("The bot is not running" in h.proto.body for h in at.get("html"))
 
 
 def test_log_reader_keeps_tracebacks_with_their_line(tmp_path):
@@ -305,3 +306,13 @@ def test_what_if_signals_follow_the_strategy_rules():
     sig = simulate_signals(t, z, z_entry=2.0, z_exit=0.0)
     assert sig["kind"].tolist() == ["long", "exit", "short", "exit"]
     assert sig["time"].tolist() == [t[1], t[3], t[5], t[7]]
+
+
+def test_live_lines_break_where_the_bot_was_down():
+    from cryptopairs.ui.charts import _with_gaps
+
+    df = pd.DataFrame({"ts": [0, 5_000, 10_000, 100_000, 105_000], "equity": [1.0, 2.0, 3.0, 4.0, 5.0],
+                       "side": [1, 1, 1, -1, -1], "session_id": ["s"] * 5})  # int and text columns as in the DB
+    out = _with_gaps(df)
+    assert out["equity"].isna().sum() == 1 and out["ts"].is_monotonic_increasing
+    assert out.loc[out["equity"].isna(), "ts"].item() == 99_999

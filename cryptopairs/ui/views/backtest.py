@@ -97,19 +97,19 @@ spec = [("Total return", "TotalRet", "{:+.2%}"), ("Annual return", "AnnRet", "{:
         ("Win rate", "WinRate", "{:.0%}"), ("Stop-losses", "StopLosses", "{:.0f}"), ("Fees (USDT)", "Fees", "{:,.2f}"),
         ("Funding (USDT)", "Funding", "{:+,.2f}"), ("Final equity", "FinalEquity", "{:,.2f}")]
 focus = names[-1]
-kc = st.columns(6)
-for col, (label, k, f) in zip(kc, [spec[0], spec[2], spec[4], spec[5], spec[6], spec[9]]):
+kc = W.kpis("lab")
+for label, k, f in [spec[0], spec[2], spec[4], spec[5], spec[6], spec[9]]:
     v, ref = metrics[focus][k], metrics["calibrated"][k]
     delta = None
     if focus != "calibrated" and np.isfinite(v) and np.isfinite(ref):
         delta = (f.format(v - ref) if k not in ("Trades",) else f"{v - ref:+.0f}") + " vs calibrated"
-    col.metric(f"{label} · {focus}", f.format(v) if np.isfinite(v) else "—", delta,
+    kc.metric(f"{label} · {focus}", f.format(v) if np.isfinite(v) else "—", delta,
                delta_color="inverse" if k == "Funding" else "normal")
 table = pd.DataFrame({n: [f.format(metrics[n][k]) if np.isfinite(metrics[n][k]) else "—" for _, k, f in spec]
                       for n in names}, index=[s[0] for s in spec])
 left, right = st.columns([2, 3], gap="large")
 with left:
-    st.dataframe(table, width="stretch")
+    st.dataframe(table, width="stretch", placeholder="")
     st.caption(f"Capital {wi.capital:,.0f} USDT · leverage {wi.leverage:g}x · Sharpe annualised with √8760 on hourly "
                "returns · results include every modelled cost.")
 with right:
@@ -163,7 +163,7 @@ else:
                                              "PnL %": "{:+.2f}%", "fees": "{:,.2f}", "funding": "{:+,.2f}"}, na_rep="")
                  .map(lambda v: f"color: {GREEN}" if isinstance(v, float) and v > 0 else
                       (f"color: {RED}" if isinstance(v, float) and v < 0 else ""), subset=["PnL", "PnL %"]),
-                 width="stretch", hide_index=True, height=360)
+                 width="stretch", hide_index=True, placeholder="", height=360)
     st.download_button("Download trades (CSV)", tf.to_csv(index=False).encode(), f"{pid}_{focus}_trades.csv", "text/csv",
                        on_click="ignore")
 st.html(f'<div style="color:{MUTED};font-size:.78rem;margin-top:10px">Use this page to understand a change, not to '

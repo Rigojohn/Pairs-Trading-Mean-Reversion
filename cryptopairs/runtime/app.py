@@ -117,6 +117,22 @@ def archive_state(cfg: AppConfig) -> Path | None:
     return target
 
 
+async def _load_markets(exchange, attempts: int = 5) -> None:
+    """Exchange metadata at start-up; a network hiccup must not stop the bot."""
+    import ccxt
+
+    for attempt in range(1, attempts + 1):
+        try:
+            await exchange.load_markets()
+            return
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as exc:
+            if attempt == attempts:
+                raise
+            log.warning("loading the exchange markets failed (%s: %s); retry %d/%d in %d s",
+                        type(exc).__name__, exc, attempt, attempts - 1, 5 * attempt)
+            await asyncio.sleep(5 * attempt)
+
+
 async def run_app(cfg: AppConfig) -> None:
     rt = cfg.runtime
     if rt.mode != "paper":
@@ -136,7 +152,7 @@ async def run_app(cfg: AppConfig) -> None:
     feed = None
     tasks: list[asyncio.Task] = []
     try:
-        await exchange.load_markets()
+        await _load_markets(exchange)
         specs = build_specs(exchange, load_pairs_file(rt.pairs_file), rt.capital_per_pair)
         orphans = orphan_specs(specs, store.load_pairs())
         for o in orphans:

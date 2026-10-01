@@ -146,3 +146,17 @@ def test_engine_opens_and_closes_a_paper_trade(tmp_path):
     orders = store.query("SELECT kind, status FROM orders ORDER BY id")
     assert orders == [{"kind": "open", "status": "filled"}, {"kind": "close", "status": "filled"}]
     assert len(store.query("SELECT * FROM fills")) == 4
+
+
+def test_pairs_file_defaults_to_the_profile_and_suggests_a_fix(tmp_path):
+    from cryptopairs.cli import resolve_pairs_file
+    from cryptopairs.config import AppConfig
+
+    cfg = AppConfig(profile="kalman")
+    cfg.research.runs_dir = str(tmp_path)
+    (tmp_path / "kalman").mkdir()
+    (tmp_path / "kalman" / "pairs.yaml").write_text("pairs: []\n")
+    assert resolve_pairs_file(cfg, None) == str(tmp_path / "kalman" / "pairs.yaml")
+    with pytest.raises(SystemExit) as exc:
+        resolve_pairs_file(cfg, str(tmp_path / "kalmann" / "pairs.yaml"))  # the typo that stopped the bot
+    assert "did you mean:  " + str(tmp_path / "kalman" / "pairs.yaml") in str(exc.value)

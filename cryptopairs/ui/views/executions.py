@@ -28,14 +28,14 @@ def live() -> None:
         st.caption("No executions yet.")
         return
     calm = ex[~ex["urgent"]]
-    c = st.columns(6)
-    c[0].metric("Executions", f"{len(ex)}", f"{int(ex['urgent'].sum())} urgent (stops)", delta_color="off")
-    c[1].metric("Maker share", f"{calm['maker %'].mean():.0f}%" if len(calm) else "—",
+    c = W.kpis("exec")
+    c.metric("Executions", f"{len(ex)}", f"{int(ex['urgent'].sum())} urgent (stops)", delta_color="off", delta_arrow="off")
+    c.metric("Maker share", f"{calm['maker %'].mean():.0f}%" if len(calm) else "—",
                 help="share of non-urgent notional filled as maker (post-only)")
-    c[2].metric("Avg cost", f"{ex['cost bps'].mean():.1f} bps", help="fees + price vs mid; all-taker is ~10-15 bps")
-    c[3].metric("Avg fees", f"{ex['fee bps'].mean():.1f} bps", help="taker 5 bps, maker 2 bps")
-    c[4].metric("Median time", f"{ex['seconds'].median():.0f} s", f"max {ex['seconds'].max():.0f} s", delta_color="off")
-    c[5].metric("Cost saved vs taker", f"{max(0.0, 12.5 - ex['cost bps'].mean()):.1f} bps",
+    c.metric("Avg cost", f"{ex['cost bps'].mean():.1f} bps", help="fees + price vs mid; all-taker is ~10-15 bps")
+    c.metric("Avg fees", f"{ex['fee bps'].mean():.1f} bps", help="taker 5 bps, maker 2 bps")
+    c.metric("Median time", f"{ex['seconds'].median():.0f} s", f"max {ex['seconds'].max():.0f} s", delta_color="off", delta_arrow="off")
+    c.metric("Cost saved vs taker", f"{max(0.0, 12.5 - ex['cost bps'].mean()):.1f} bps",
                 help="vs ~12.5 bps for two market orders (5 bps fee + half spread + slippage); indicative")
     left, right = st.columns([3, 2], gap="medium")
     with left:
@@ -45,11 +45,11 @@ def live() -> None:
         heading("By pair")
         per = ex.groupby("pair")[["maker %", "cost bps", "fee bps", "seconds"]].mean().round(1)
         per["executions"] = ex.groupby("pair").size()
-        st.dataframe(per.sort_values("cost bps"), width="stretch", key="ex_by_pair")
+        st.dataframe(per.sort_values("cost bps"), width="stretch", key="ex_by_pair", placeholder="")
     heading("All executions")
     st.dataframe(ex.iloc[::-1].style.format({"maker %": "{:.0f}%", "cost bps": "{:.1f}", "fee bps": "{:.1f}",
                                              "seconds": "{:.0f}"}),
-                 width="stretch", hide_index=True, key="ex_all",
+                 width="stretch", hide_index=True, placeholder="", key="ex_all",
                  column_config={"time": st.column_config.DatetimeColumn("time (UTC)", format="MM-DD HH:mm:ss")})
 
 

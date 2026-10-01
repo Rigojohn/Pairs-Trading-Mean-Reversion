@@ -61,7 +61,8 @@ export default function (component) {
   delete layout.width;
   layout.autosize = true;
   layout.uirevision = data.rev;  // same value on every update = keep zoom, pan and legend state
-  const config = { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] };
+  const config = { displaylogo: false, responsive: true, displayModeBar: "hover",
+                   modeBarButtonsToRemove: ["lasso2d", "select2d"] };
   plotly().then((Plotly) => {
     if (el.__cpReady) {
       Plotly.react(el, fig.data, layout, config);
@@ -80,23 +81,83 @@ export default function (component) {
 
 CSS = ".cp-chart { width: 100%; }"
 
-_renderers: dict[int, tuple[object, Callable]] = {}
+# A badge that ticks every second in the browser: how old the bot's data is and when the page last
+# synced. If the page stops receiving updates (server restarted, network, sleeping laptop), it turns red
+# and reloads the page by itself instead of silently showing frozen numbers.
+WATCHDOG_JS = r"""
+function fmt(s) { return s < 90 ? s.toFixed(0) + "s" : s < 5400 ? (s / 60).toFixed(0) + " min" : (s / 3600).toFixed(1) + " h"; }
+
+export default function (component) {
+  const { data, parentElement } = component;
+  const W = window.__cpWatch || (window.__cpWatch = {});
+  const token = parentElement.__cpToken || (parentElement.__cpToken = Math.random());
+  W.owner = token;
+  W.last = Date.now();
+  W.offset = data.server_ms - Date.now();  // server clock vs this browser's clock
+  W.bot = data.bot_ms;
+  W.every = data.every;
+  W.reloadAfter = Math.max(45, 10 * data.every);
+  let el = document.getElementById("cp-watchdog");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "cp-watchdog";
+    document.body.appendChild(el);
+  }
+  const lost = () => W.every > 0 && (Date.now() - W.last) / 1000 > Math.max(15, 6 * W.every);
+  const tick = () => {
+    const now = Date.now();
+    const page = (now - W.last) / 1000;
+    const bot = W.bot ? Math.max(0, (now + W.offset - W.bot) / 1000) : null;
+    let cls, text;
+    if (W.every === 0) {
+      cls = "mute"; text = "❚❚ live updates paused";
+    } else if (lost()) {
+      cls = "bad"; text = "● connection lost " + fmt(page) + " · reloading in " + Math.max(0, Math.ceil(W.reloadAfter - page)) + "s";
+      if (page > W.reloadAfter && !W.reloading) { W.reloading = true; location.reload(); }
+    } else if (bot === null || bot > 30) {
+      cls = "warn"; text = "● bot data " + (bot === null ? "missing" : fmt(bot) + " old") + " · is the bot running?";
+    } else {
+      cls = "ok"; text = "● LIVE · prices " + fmt(bot) + " old · page " + fmt(page) + " ago";
+    }
+    el.className = cls;
+    el.textContent = text;
+  };
+  if (!W.timer) W.timer = setInterval(tick, 1000);
+  if (!W.onVisible) {  // a tab left in the background may have missed updates: catch up when it is shown
+    W.onVisible = () => { if (!document.hidden && lost()) location.reload(); };
+    document.addEventListener("visibilitychange", W.onVisible);
+  }
+  tick();
+  return () => {
+    if (W.owner !== token) return;  // another page's badge already took over
+    clearInterval(W.timer);
+    W.timer = null;
+    const e = document.getElementById("cp-watchdog");
+    if (e) e.remove();
+  };
+}
+"""
+
+_renderers: dict[tuple[int, str], tuple[object, Callable]] = {}
 
 
-def _renderer() -> Callable:
-    """The mount command, registered once per Streamlit runtime (tests start several)."""
+def _renderer(name: str = "chart") -> Callable:
+    """A mount command, registered once per Streamlit runtime (tests start several)."""
     from streamlit.components.v2.get_bidi_component_manager import get_bidi_component_manager
 
     manager = get_bidi_component_manager()
-    entry = _renderers.get(id(manager))
+    entry = _renderers.get((id(manager), name))
     if entry is None or entry[0] is not manager:  # keeping the manager stops its id being reused
-        mount = st.components.v2.component(
-            "cryptopairs_live_chart",
-            js=JS.replace("__VERSION__", plotly.offline.get_plotlyjs_version()),
-            css=CSS,
-            isolate_styles=False,  # plotly.js styles its hover labels and toolbar from the page's <head>
-        )
-        entry = _renderers[id(manager)] = (manager, mount)
+        if name == "chart":
+            mount = st.components.v2.component(
+                "cryptopairs_live_chart",
+                js=JS.replace("__VERSION__", plotly.offline.get_plotlyjs_version()),
+                css=CSS,
+                isolate_styles=False,  # plotly.js styles its hover labels and toolbar from the page's <head>
+            )
+        else:
+            mount = st.components.v2.component("cryptopairs_watchdog", js=WATCHDOG_JS, isolate_styles=False)
+        entry = _renderers[(id(manager), name)] = (manager, mount)
     return entry[1]
 
 
@@ -113,4 +174,10 @@ def chart(fig: go.Figure, key: str, rev: str | None = None) -> None:
 
     ``rev`` resets the user's zoom when it changes (e.g. another pair or time window).
     """
-    _renderer()(key=key, data={"fig": fig.to_json(), "rev": rev or key}, width="stretch")
+    _renderer("chart")(key=key, data={"fig": fig.to_json(), "rev": rev or key}, width="stretch")
+
+
+def watchdog(bot_ms: int | None, every: int, server_ms: int) -> None:
+    """The live badge (top right): ticks in the browser, flags and recovers a page that stopped updating."""
+    _renderer("watchdog")(key="watchdog", data={"bot_ms": bot_ms, "every": every, "server_ms": server_ms},
+                          width="content", height=0)

@@ -19,11 +19,11 @@ pair = ctx.pair(pid)
 a, b = pair["a"].split("/")[0], pair["b"].split("/")[0]
 page_title(f"{a} / {b}", f"Pair monitor · {pid} · change the pair in the sidebar")
 
-opts = st.columns([1.3, 1.3, 1.3, 4])
-show_sim = opts[0].toggle("What-if signals", value=True, help="signals the sidebar thresholds would give on the "
+opts = st.container(horizontal=True, gap="large")
+show_sim = opts.toggle("What-if signals", value=True, help="signals the sidebar thresholds would give on the "
                           "hourly model Z (no costs, stops or filters)")
-show_live = opts[1].toggle("Live ticks", value=True, help="15-second snapshots between the hourly bars")
-show_model = opts[2].toggle("Model diagnostics", value=False, help="spread with bands, β and σ: model now vs in use")
+show_live = opts.toggle("Live ticks", value=True, help="15-second snapshots between the hourly bars")
+show_model = opts.toggle("Model diagnostics", value=False, help="spread with bands, β and σ: model now vs in use")
 
 
 @st.fragment(run_every=ctx.refresh or None)
@@ -49,29 +49,29 @@ def live() -> None:
     live_last = p["live"].iloc[-1] if not p["live"].empty else None
     fit_last = fit.iloc[-1] if not fit.empty else None
 
-    c = st.columns(8)
-    c[0].metric("Position", row["position"], row["status"] or "active", delta_color="off")
-    c[1].metric("Unrealized", f"{row['unrealized']:+,.4f}",
-                f"{row['unrealized %']:+.2f}% of entry" if np.isfinite(row["unrealized %"]) else None)
-    zs = p["live"]["z_buy"].add(p["live"]["z_sell"]).div(2).tail(240).round(3).tolist() if not p["live"].empty else None
-    c[2].metric("Z now", f"{row['Z now']:+.2f}" if np.isfinite(row["Z now"]) else "—",
-                f"entry ±{row['Z entry']:g} · exit ±{row['Z exit']:g}", delta_color="off", chart_data=zs)
+    info = dict(delta_color="off", delta_arrow="off")  # a caption under the value, not a change
+    g = W.kpis("pair")
+    g.metric("Position", row["position"] if row["side"] else "FLAT", row["status"] or "active", **info)
+    g.metric("Unrealized", f"{row['unrealized']:+,.4f}",
+             f"{row['unrealized %']:+.2f}%" if np.isfinite(row["unrealized %"]) else None,
+             help="USDT, and % of the equity at entry")
+    g.metric("Z now", f"{row['Z now']:+.2f}" if np.isfinite(row["Z now"]) else "—",
+             f"entry ±{row['Z entry']:g} · exit ±{row['Z exit']:g}", **info)
     if row["side"]:
-        c[3].metric("To exit (Z)", f"{row['to exit']:+.2f}" if np.isfinite(row["to exit"]) else "—",
-                    f"stop in {row['to stop %']:.1f}%" if np.isfinite(row["to stop %"]) else None, delta_color="off")
+        g.metric("To exit (Z)", f"{row['to exit']:+.2f}" if np.isfinite(row["to exit"]) else "—",
+                 f"stop {row['to stop %']:.1f}% away" if np.isfinite(row["to stop %"]) else None, **info)
     else:
-        c[3].metric("To entry (Z)", f"{row['to entry']:+.2f}" if np.isfinite(row["to entry"]) else "—",
-                    "signal" if np.isfinite(row["to entry"]) and row["to entry"] <= 0 else "waiting", delta_color="off")
-    c[4].metric("β in use", f"{st_['beta']:.4f}" if st_.get("beta") is not None else "—",
-                f"model now {fit_last['kf_beta']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_beta"]) else None,
-                delta_color="off")
-    c[5].metric("σ in use", f"{st_['sigma']:.4f}" if st_.get("sigma") else "—",
-                f"model now {fit_last['kf_sigma']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_sigma"]) else None,
-                delta_color="off")
-    c[6].metric("Bid-ask A / B", f"{live_last['hs_bps_a'] * 2:.1f} / {live_last['hs_bps_b'] * 2:.1f}"
-                if live_last is not None and pd.notna(live_last["hs_bps_a"]) else "—", "bps", delta_color="off")
-    c[7].metric("Realized", f"{row['realized']:+,.4f}", f"{int(row['trades'])} trades · {int(row['wins'])} won",
-                delta_color="off")
+        g.metric("To entry (Z)", f"{row['to entry']:+.2f}" if np.isfinite(row["to entry"]) else "—",
+                 "signal" if np.isfinite(row["to entry"]) and row["to entry"] <= 0 else "waiting", **info)
+    g.metric("β in use", f"{st_['beta']:.4f}" if st_.get("beta") is not None else "—",
+             f"model {fit_last['kf_beta']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_beta"]) else None,
+             **info, help="hedge ratio the position trades on vs the estimate now")
+    g.metric("σ in use", f"{st_['sigma']:.4f}" if st_.get("sigma") else "—",
+             f"model {fit_last['kf_sigma']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_sigma"]) else None,
+             **info)
+    g.metric("Bid-ask (bps)", f"{live_last['hs_bps_a'] * 2:.1f} / {live_last['hs_bps_b'] * 2:.1f}"
+             if live_last is not None and pd.notna(live_last["hs_bps_a"]) else "—", f"{a} / {b}", **info)
+    g.metric("Realized", f"{row['realized']:+,.4f}", f"{int(row['trades'])} trades · {int(row['wins'])} won", **info)
 
     trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
     marks, spans = W.trade_markers(trades, fit, p["live"]) if len(trades) else (pd.DataFrame(), [])
@@ -86,7 +86,9 @@ def live() -> None:
         if len(sim):
             sim["text"] = sim["kind"].map({"long": "what-if BUY spread", "short": "what-if SELL spread",
                                            "exit": "what-if CLOSE"}) + sim["z"].map(lambda z: f" · Z {z:+.2f}")
-    heading("Chart A · normalised price action")
+    heading("Live · last 60 minutes at the bot's 5-second marks")
+    LIVE.chart(C.live_pair_chart(p["live"], a, b, use.z_entry, use.z_exit), key="pm_live", rev=f"live-{pid}")
+    heading("Chart A · normalised price action · both legs rebased to 100")
     rev = f"{pid}-{ctx.window}"  # a new pair or window resets the zoom; live ticks keep it
     LIVE.chart(C.prices_chart(fit, lv, a, b, spans), key="pm_prices", rev=rev)
     heading("Chart B · spread Z-score, thresholds and signals")
@@ -113,7 +115,7 @@ def live() -> None:
                          "notional": abs(qty) * mark, "leg PnL": qty * (mark - entry_px)})
         lg = pd.DataFrame(legs)
         st.dataframe(lg.style.format({"qty": "{:,.4f}", "entry": "{:.6g}", "mark": "{:.6g}", "move %": "{:+.2f}%",
-                                      "notional": "{:,.2f}", "leg PnL": "{:+,.4f}"}), width="stretch", hide_index=True,
+                                      "notional": "{:,.2f}", "leg PnL": "{:+,.4f}"}), width="stretch", hide_index=True, placeholder="",
                      key="pm_legs")
         ratio = legs[1]["notional"] / legs[0]["notional"] if legs[0]["notional"] else np.nan
         st.caption(f"Hedge ratio now {ratio:.3f} vs β at entry {st_.get('beta', np.nan):.3f} · entry equity "
@@ -124,7 +126,7 @@ def live() -> None:
         tv = D.trade_view(trades.iloc[::-1])
         st.dataframe(tv.style.format({"hours": "{:.1f}", "Z entry": "{:+.2f}", "beta": "{:.4f}", "PnL": "{:+,.4f}",
                                       "PnL %": "{:+.2f}%", "fees": "{:.4f}", "funding": "{:+.4f}"}, na_rep=""),
-                     width="stretch", hide_index=True, key="pm_trades")
+                     width="stretch", hide_index=True, placeholder="", key="pm_trades")
 
 
 live()

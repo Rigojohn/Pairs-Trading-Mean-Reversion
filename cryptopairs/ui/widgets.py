@@ -12,6 +12,7 @@ import streamlit as st
 
 from cryptopairs.runtime.store import submit_command
 from cryptopairs.ui import data as D
+from cryptopairs.ui import live as LIVE
 from cryptopairs.ui.lab import DELTAS, LOOKBACKS, WhatIf, calibrated, in_use
 from cryptopairs.ui.theme import pill, signed
 
@@ -134,7 +135,7 @@ def _what_if_panel(brief: dict, pid: str, leverage: float) -> dict[str, WhatIf]:
         if kalman:
             deltas = sorted({*DELTAS, cur.kalman_delta, live.kalman_delta} - {None})
             delta = st.select_slider("Hedge-ratio adaptivity (Kalman δ)", deltas, value=cur.kalman_delta,
-                                     key=f"wi_kd_{pid}", format_func=lambda d: f"{d:.0e} · ~{1 / math.sqrt(d) / 24:,.0f} d memory",
+                                     key=f"wi_kd_{pid}", format_func=lambda d: f"{d:.0e} ({1 / math.sqrt(d) / 24:,.0f}d)",
                                      help="higher δ = β and the mean adapt faster (shorter memory)")
             lookback = st.select_slider("σ window / warm-up (bars)", lookbacks, value=int(cur.lookback),
                                         key=f"wi_lb_{pid}", format_func=lambda n: f"{n} h · {n / 24:.0f} d")
@@ -179,18 +180,26 @@ def status_strip(d: dict, ctx: Ctx, curve: pd.Series, rows: pd.DataFrame, capita
     """One line on top of every page: bot heartbeat, mode, equity, today, open positions, next bar."""
     kv = D.kv_dict(d)
     age = D.heartbeat_age(d)
+    hb = d["heartbeat"]["ts"].iloc[0] if not d["heartbeat"].empty else None
+    LIVE.watchdog(int(hb) if hb is not None and pd.notna(hb) else None, ctx.refresh, D.now_ms())
     if age is None:
         bot = pill("NO LIVE DATA", "mute")
     elif age < 60:
         bot = pill(f"● LIVE · {age:.0f}s", "ok")
     else:
-        bot = pill(f"STALE · {age / 60:.0f} min", "bad")
+        bot = pill(f"BOT DOWN · {ago(age).replace(' ago', '')}", "bad")
     if kv.get("risk.kill_switch"):
         mode = pill("KILL SWITCH", "bad")
     elif kv.get("entries_paused"):
         mode = pill("ENTRIES PAUSED", "warn")
     else:
         mode = pill("TRADING", "info")
+    if age is not None and age >= 60:
+        hb = pd.Timestamp(D.now_ms() - age * 1000, unit="ms", tz="UTC").tz_convert(None)
+        st.html(f'<div class="down"><b>● The bot is not running</b>: no live data for {ago(age).replace(" ago", "")} '
+                f'(last snapshot {hb:%H:%M:%S} UTC). Prices, PnL and Z below are frozen at that time, and nothing '
+                f'is traded or protected by stops. Start it in a terminal (no <code>--fresh</code>; positions are kept): '
+                f'<code>python -m cryptopairs --profile {ctx.brief.get("profile") or "kalman"} paper</code></div>')
     total = float(curve.iloc[-1]) if len(curve) else float(rows["equity"].sum())
     day0 = float(d["day_start"]["equity"].iloc[0]) if not d["day_start"].empty else total
     now = D.now_ms()
@@ -206,6 +215,16 @@ def status_strip(d: dict, ctx: Ctx, curve: pd.Series, rows: pd.DataFrame, capita
         f'<span><span class="k">Bot</span>{ctx.db_path.stem}</span></div>')
 
 
+def kpis(key: str):
+    """A row of KPI cards that wraps onto more rows when the screen is narrow (see theme.py)."""
+    return st.container(horizontal=True, gap="small", key=f"kpi_{key}")
+
+
+def ago(seconds: float) -> str:
+    return f"{seconds:.0f}s ago" if seconds < 90 else (f"{seconds / 60:.0f} min ago" if seconds < 5400
+                                                     else f"{seconds / 3600:.1f} h ago")
+
+
 def kpi_row(d: dict, ctx: Ctx, curve: pd.Series, rows: pd.DataFrame, capital: float, cfg: dict) -> None:
     kv = D.kv_dict(d)
     age = D.heartbeat_age(d)
@@ -215,38 +234,35 @@ def kpi_row(d: dict, ctx: Ctx, curve: pd.Series, rows: pd.DataFrame, capital: fl
     peak = kv.get("risk.peak_equity") or total
     kill_dd = (cfg.get("risk", {}) or {}).get("portfolio_max_drawdown", 0.25)
     open_rows = rows[rows["side"] != 0]
-    c = st.columns(8)
+    info = dict(delta_color="off", delta_arrow="off")  # a caption under the value, not a change
+    g = kpis("overview")
     if age is None:
-        c[0].metric("Bot", "no data", help="restart the bot to enable live snapshots")
+        g.metric("Bot", "no data", help="restart the bot to enable live snapshots")
     else:
-        c[0].metric("Bot", "LIVE" if age < 60 else "STALE", f"{age:.0f}s ago", delta_color="off" if age < 60 else "inverse")
-    spark = curve.iloc[:: max(1, len(curve) // 120)].round(2).tolist() if len(curve) > 2 else None
-    c[1].metric("Equity", f"{total:,.2f}", f"{100 * (total / capital - 1):+.2f}% on {capital:,.0f}",
-                chart_data=spark, chart_type="area")
-    c[2].metric("Daily PnL", f"{total - day0:+,.2f}", f"{100 * (total / day0 - 1):+.2f}%" if day0 else None,
-                help="equity now vs the first snapshot after 00:00 UTC")
-    c[3].metric("Open", f"{len(open_rows)} / {len(rows)}",
-                f"gross {open_rows['notional'].sum():,.0f} USDT" if len(open_rows) else "flat", delta_color="off",
-                help=f"unrealized {open_rows['unrealized'].sum():+,.4f} USDT")
+        g.metric("Bot", "LIVE" if age < 60 else "DOWN", ago(age), delta_color="off" if age < 60 else "inverse",
+                 delta_arrow="off", help="time since the bot's last live snapshot (it writes one every ~5 s)")
+    g.metric("Equity", f"{total:,.2f}", f"{100 * (total / capital - 1):+.2f}%", help=f"capital {capital:,.2f} USDT")
+    g.metric("Daily PnL", f"{total - day0:+,.2f}", f"{100 * (total / day0 - 1):+.2f}%" if day0 else None,
+             help="equity now vs the first snapshot after 00:00 UTC")
+    g.metric("Open pairs", f"{len(open_rows)} / {len(rows)}",
+             f"{open_rows['notional'].sum():,.0f} USDT gross" if len(open_rows) else "flat", **info,
+             help=f"unrealized {open_rows['unrealized'].sum():+,.4f} USDT")
     sh = perf["sharpe"]
-    c[4].metric(f"Sharpe ({ctx.window})", f"{sh:.2f}" if np.isfinite(sh) else "—",
-                f"{perf['hours']} h of bars", delta_color="off",
-                help="annualised (√8760) from hourly bar-close equity; needs ≥ 24 bars and means little "
-                     "before a few weeks of trading")
+    g.metric(f"Sharpe {ctx.window}", f"{sh:.2f}" if np.isfinite(sh) else "—", f"{perf['hours']} h of data", **info,
+             help="annualised (√8760) from hourly bar-close equity; needs ≥ 24 bars and means little "
+                  "before a few weeks of trading")
     mdd = perf["max_dd"]
     head = 100 * (total / (peak * (1 - kill_dd)) - 1)
-    c[5].metric(f"Max DD ({ctx.window})", f"{100 * mdd:.2f}%" if np.isfinite(mdd) else "—",
-                f"kill switch {head:.1f}% away", delta_color="off",
-                help=f"kill switch at {kill_dd:.0%} below the peak equity {peak:,.2f}")
+    g.metric(f"Max DD {ctx.window}", f"{100 * mdd:.2f}%" if np.isfinite(mdd) else "—", f"kill switch {head:.0f}% away",
+             **info, help=f"kill switch at {kill_dd:.0%} below the peak equity {peak:,.2f}")
     fr = rows[rows["pair"] == ctx.focus]
     if len(fr):
         r = fr.iloc[0]
-        c[6].metric(f"Z · {r['a']}/{r['b']}", f"{r['Z now']:+.2f}" if np.isfinite(r["Z now"]) else "—",
-                    f"entry ±{r['Z entry']:g} · {r['position']}", delta_color="off",
-                    help="live Z of the focus pair (mid of the executable buy/sell Z)")
+        g.metric(f"Z {r['a']}/{r['b']}", f"{r['Z now']:+.2f}" if np.isfinite(r["Z now"]) else "—",
+                 f"{r['position'] if r['position'] != '-' else 'flat'} · entry ±{r['Z entry']:g}", **info,
+                 help="live Z of the focus pair (mid of the executable buy/sell Z)")
     status = "KILL SWITCH" if kv.get("risk.kill_switch") else ("PAUSED" if kv.get("entries_paused") else "TRADING")
-    c[7].metric("Status", status, f"{int(rows['paused'].sum())} paused · {int(rows['override'].sum())} override",
-                delta_color="off")
+    g.metric("Status", status, f"{int(rows['paused'].sum())} paused · {int(rows['override'].sum())} override", **info)
 
 
 # ------------------------------------------------------------ trade marks

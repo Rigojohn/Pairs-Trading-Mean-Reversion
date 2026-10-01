@@ -59,21 +59,21 @@ def live() -> None:
             W.send(ctx.db_path, "flatten_all")
 
     heading("Risk limits in force")
-    lim = st.columns(6)
-    lim[0].metric("Leverage", f"{strat.get('leverage', '—')}x")
-    lim[1].metric("Stop-loss", f"{(strat.get('stop_loss_pct') or 0):.0%}", "of entry equity, bar close", delta_color="off")
+    lim = W.kpis("limits")
+    lim.metric("Leverage", f"{strat.get('leverage', '—')}x")
+    lim.metric("Stop-loss", f"{(strat.get('stop_loss_pct') or 0):.0%}", "bar close", delta_color="off", delta_arrow="off")
     cat = strat.get("catastrophe_stop_pct")
-    lim[2].metric("Catastrophe stop", f"{cat:.0%}" if cat else "off", "checked every ~5 s", delta_color="off")
-    lim[3].metric("Max |Z| at entry", f"{strat.get('max_entry_z') or '—'}")
-    lim[4].metric("Max open pairs", f"{risk.get('max_open_pairs', '—')}")
-    lim[5].metric("Max gross / coin", f"{risk.get('max_symbol_gross_leverage', '—')}x equity")
+    lim.metric("Catastrophe stop", f"{cat:.0%}" if cat else "off", "checked every ~5 s", delta_color="off", delta_arrow="off")
+    lim.metric("Max |Z| at entry", f"{strat.get('max_entry_z') or '—'}")
+    lim.metric("Max open pairs", f"{risk.get('max_open_pairs', '—')}")
+    lim.metric("Max gross / coin", f"{risk.get('max_symbol_gross_leverage', '—')}x equity")
 
     heading("Per-pair controls")
     view = rows[rows["pair"].isin(ctx.view_pairs)]
     st.dataframe(view[["pair", "position", "equity", "PnL", "Z now", "Z entry", "Z exit", "lookback", "kalman_delta",
-                       "status"]].style.format({"equity": "{:,.2f}", "PnL": "{:+,.2f}", "Z now": "{:+.2f}",
-                                                "kalman_delta": "{:.0e}"}, na_rep=""),
-                 width="stretch", hide_index=True, key="ct_pairs")
+                       "status"]].rename(columns={"kalman_delta": "Kalman δ"}).style.format({"equity": "{:,.2f}", "PnL": "{:+,.2f}", "Z now": "{:+.2f}",
+                                                "Kalman δ": "{:.0e}"}, na_rep=""),
+                 width="stretch", hide_index=True, placeholder="", key="ct_pairs")
     pc = st.columns([3, 2, 2, 2])
     pid = pc[0].selectbox("Pair", view["pair"].tolist(), key="ctl_pair")
     r = view[view["pair"] == pid].iloc[0] if pid else None
@@ -104,7 +104,7 @@ def live() -> None:
             "Z exit": f"{v['base']['z_exit']:g} → {v['params']['z_exit']:g}",
             "lookback": f"{v['base']['lookback']} → {v['params']['lookback']}",
             "δ": f"{v['base'].get('kalman_delta')} → {v['params'].get('kalman_delta')}",
-        } for k, v in ov.items()]), width="stretch", hide_index=True, key="ct_overrides")
+        } for k, v in ov.items()]), width="stretch", hide_index=True, placeholder="", key="ct_overrides")
 
     heading("Command history")
     cmds = d["commands"]
@@ -122,7 +122,7 @@ def live() -> None:
             .map(lambda v: "color: #2ebd85" if v == "done" else ("color: #f6465d" if v == "rejected" else
                                                                  ("color: #f0b429" if v == "pending" else "")),
                  subset=["status"]),
-            width="stretch", hide_index=True, key="ct_commands",
+            width="stretch", hide_index=True, placeholder="", key="ct_commands",
             column_config={"sent (UTC)": st.column_config.DatetimeColumn(format="MM-DD HH:mm:ss")})
 
 

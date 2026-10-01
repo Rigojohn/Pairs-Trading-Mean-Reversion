@@ -1,6 +1,6 @@
 # CryptoPairsBot: κατάσταση project (handoff)
 
-> Τελευταία ενημέρωση: **2026-10-01, ~21:45 ώρα Ελλάδας**. Γράφτηκε για να συνεχίσει ένα νέο session από εδώ.
+> Τελευταία ενημέρωση: **2026-10-01, ~23:00 ώρα Ελλάδας**. Γράφτηκε για να συνεχίσει ένα νέο session από εδώ.
 > Γλώσσα επικοινωνίας με τον χρήστη: **ελληνικά** (κώδικας και τεχνικοί όροι στα αγγλικά).
 
 ---
@@ -12,8 +12,8 @@
   - έρευνα: λήψη δεδομένων, funnel, βαθμονόμηση, backtest με ρεαλιστικά κόστη, πειράματα validation/test;
   - paper bot: Kalman filter, εκτέλεση «maker πρώτα», κίνδυνος, βάση SQLite με ανάκτηση μετά από crash;
   - real-time dashboard **πολλών σελίδων** (σκούρο θέμα, what-if sliders, Backtest lab, εφαρμογή παραμέτρων στο bot);
-  - Docker για VPS (το build δεν έχει δοκιμαστεί);
-  - **81 tests περνούν**.
+  - Docker για VPS: bot + dashboard, `deploy.sh`, οδηγός `DEPLOY.md` (το build δεν έχει δοκιμαστεί);
+  - **83 tests περνούν**.
 - **Βασικό εύρημα:** με ρεαλιστικά κόστη η στρατηγική έχει **μικρό και ασταθές πλεονέκτημα**. Η καλύτερη εκδοχή (K1 Kalman) έβγαλε **−9,7% στο validation** (Αύγ. 2025 – Φεβ. 2026) και **+27,5% στο test** (Μάρ. – Σεπ. 2026). **Δεν έχει προταθεί live με πραγματικά χρήματα.** Το paper trading είναι η τρέχουσα «αληθινή» δοκιμή.
 - **Τι τρέχει τώρα (τοπικά):**
   - paper bot με profile `kalman` (K1), 3 ανοιχτές θέσεις, equity ≈ €1.700;
@@ -23,12 +23,24 @@
 
 ---
 
+> **2026-10-01 23:54 (ώρα Ελλάδας): το paper bot ΤΡΕΧΕΙ ΣΤΟΝ SERVER**: OVHcloud VPS-1, `152.228.175.62` (`vps-3ce1c275.vps.ovh.net`), Γαλλία, Ubuntu 24.04, Docker 29.8 / Compose v5.5. Η βάση μεταφέρθηκε από το PC: ίδιες 4 θέσεις, νέα συνεδρία `paper_20261001_205409_394c0f` στην ίδια `paper.db`. Κενά: 23:18–23:20 και ~1 λεπτό στις 23:54. **Το τοπικό bot και dashboard είναι ΣΤΑΜΑΤΗΜΕΝΑ. Μην τα ξεκινήσεις τοπικά** (η τοπική `state/paper.db` είναι πλέον παλιό αντίγραφο). SSH: `ssh cryptobot` (χρήστης `ubuntu`, μέλος του group `docker`, sudo χωρίς κωδικό). Η σύνδεση με κωδικό είναι κλειστή (`/etc/ssh/sshd_config.d/00-cryptobot-keys-only.conf`). Τον κωδικό του `ubuntu` τον όρισε ο χρήστης και τον ξέρει μόνο εκείνος. Το `data/` έχει ανέβει (Backtest lab). Dashboard: `ssh -N -L 8502:127.0.0.1:8501 cryptobot` → http://localhost:8502. Ενημερώσεις: `./deploy.sh`.
+
 ## 1. Εκκρεμότητες (με σειρά προτεραιότητας)
 
-0. **Επανεκκίνηση bot ΚΑΙ dashboard, χωρίς `--fresh`** (μετά το dashboard v3, 2026-10-01 ~21:45):
+0. ~~Bot κάτω~~: **ξανά σε λειτουργία από τις 22:38** (PID 204313), με 4 ανοιχτές θέσεις (νέα: BAND/GTC LONG). Dashboard PID 204663 (22:39).
+   Ιστορικό του προβλήματος: **το bot δεν έτρεχε από τις 22:03:38.** Η αιτία βρέθηκε στις 22:35: ο χρήστης έγραφε `--pairs runs/kalmann/pairs.yaml`, με δύο «n» (FileNotFoundError, και στις 22:31 και στις 22:33). Πλέον:
+   - το `--pairs` είναι προαιρετικό: η προεπιλογή είναι `runs/<profile>/pairs.yaml`, οπότε αρκεί `python -m cryptopairs --profile kalman paper`;
+   - ένα λάθος όνομα δίνει «did you mean» και σταματά πριν ανοίξει συνεδρία;
+   - το `load_markets` ξαναδοκιμάζει 5 φορές;
+   - κάθε σφάλμα εκκίνησης γράφεται στο `logs/paper.log`;
+   - το dashboard δείχνει κόκκινο banner «The bot is not running».
+   Το dashboard (PID 182974, 22:03) χρειάζεται επίσης restart: έχει φορτωμένα παλιά modules και κάποιες σελίδες βγάζουν σφάλμα «no attribute 'kpis'».
+0b. **Επανεκκίνηση bot ΚΑΙ dashboard, χωρίς `--fresh`** (μετά το dashboard v3, 2026-10-01 ~21:45):
    - το bot χρειάζεται τις νέες εντολές `set_params` / `clear_params`· ένα παλιό bot τις απορρίπτει ως «unknown command»;
    - το dashboard διαβάζει το σκούρο θέμα (`.streamlit/config.toml`) μόνο στην εκκίνηση, και πρέπει να ξεκινά μέσω `python -m cryptopairs dashboard`.
    - Έλεγχος: μπάρα πλοήγησης πάνω (Overview, Pair monitor, Backtest lab, Executions, Risk & controls, System logs), σκούρο φόντο.
+   - Στις 21:34 ο χρήστης νόμιζε ότι έκανε restart, αλλά οι διεργασίες ήταν οι ίδιες: bot PID 155770 (pts/7), dashboard PID 156136 (pts/6). Το `kill <pid>` κλείνει το bot ομαλά (SIGTERM), όπως το Ctrl+C.
+   - Live χωρίς «refresh» (22:00): το bot γράφει live στιγμιότυπα κάθε **5 s** (διατήρηση 24 h, ήταν 15 s / 72 h) και το dashboard ανανεώνεται κάθε 2 s. Το static serving (`plotly.min.js`) διαβάζεται μόνο στην εκκίνηση· χωρίς restart τα γραφήματα φορτώνουν το plotly.js από CDN.
 1. ~~Επανεκκίνηση bot και dashboard~~: **ΕΓΙΝΕ** 2026-10-01 20:51. Schema v3 ενεργό, `fit_history` = 12.240 γραμμές (30 μέρες × 24 h × 17 ζεύγη), `pair_live` γράφεται κάθε 15 s, 3 θέσεις αποκαταστάθηκαν. Νέα συνεδρία: `paper_20261001_175113_619416`.
    - **Μένει:** δοκιμή ενός κουμπιού (π.χ. «Pause entries for this pair»), που πρέπει να δώσει `done` σε ~2 s. Ο πίνακας `commands` είναι ακόμα άδειος.
 2. **Paper trading για 2–4 εβδομάδες.** Συγκρίνουμε:
@@ -37,7 +49,7 @@
    - funding.
 3. **Νέα δεδομένα και ξαναβαθμονόμηση πριν από οποιοδήποτε live.** Τα ζεύγη του `runs/kalman/pairs.yaml` βαθμονομήθηκαν με δεδομένα **μέχρι 2026-02-28**, και τα τοπικά δεδομένα φτάνουν ως **2026-09-30**.
 4. **Φάση 3b: live εκτέλεση** (δες §9). Δεν έχει ξεκινήσει.
-5. **Docker/VPS.** Το `Dockerfile` και το `docker-compose.yml` υπάρχουν αλλά **δεν έχουν δοκιμαστεί**, γιατί δεν υπάρχει Docker στον υπολογιστή του χρήστη. Το compose **δεν περιλαμβάνει ακόμα το dashboard** (χρειάζεται service με port στο 127.0.0.1 και πρόσβαση μέσω SSH tunnel) ούτε το `requirements-dashboard.txt`.
+5. **Docker/VPS (έτοιμο, περιμένει server).** Ο χρήστης θα νοικιάσει VPS: προτάθηκε **OVHcloud VPS-1** (2 vCores, 4 GB, 40 GB, Γαλλία/Γερμανία, μηνιαία χωρίς δέσμευση), γιατί τα φθηνά πακέτα της Hetzner είναι «not available» από τον Ιούνιο 2026 και τα υπόλοιπα κοστίζουν πλέον ≥ €12/μήνα. Στο OVH ο χρήστης είναι `ubuntu`, και το `DEPLOY.md` βήμα 2 αντιγράφει το κλειδί στον `root`. Αποφασίστηκε 2026-10-01: bot **και** dashboard στον ίδιο server (το dashboard διαβάζει τη SQLite του bot και γράφει εκεί τις εντολές των κουμπιών, άρα όχι Streamlit Cloud). Το `docker-compose.yml` έχει πλέον δύο services (`bot`, `dashboard`), ίδιο image με τα `requirements-dashboard.txt`. Το dashboard ακούει μόνο στο `127.0.0.1:8501` του server, και ο χρήστης το βλέπει με `ssh -N -L 8502:127.0.0.1:8501 cryptobot` → http://localhost:8502. Το `./deploy.sh` κάνει rsync τον κώδικα και `docker compose up -d --build`. Οδηγός βήμα-βήμα: `DEPLOY.md` (περιλαμβάνει μεταφορά του `state/paper.db*` για να συνεχιστεί η συνεδρία, και προαιρετικό rsync του `data/` για το Backtest lab). **Το Docker build δεν έχει δοκιμαστεί ακόμα** (δεν υπάρχει Docker τοπικά). Θα δοκιμαστεί πάνω στον server. Τοπικά επαληθεύτηκε μόνο η εντολή του dashboard σε headless mode (`--no-browser`, `STREAMLIT_SERVER_FILE_WATCHER_TYPE=none`): health `ok`, σελίδα 200, plotly.js 200.
 6. Προαιρετικό, συζητήθηκε: **PCA στο funnel** (συσχέτιση αφού αφαιρεθεί ο «παράγοντας αγορά»), ως **μία** προκαθορισμένη εκδοχή με το πρωτόκολλο validation/test. Ο χρήστης ενδιαφέρθηκε, αλλά συμφωνήσαμε να προηγηθεί το paper.
 
 ---
@@ -51,7 +63,7 @@
   - Πλήρες πείραμα validation+test: **~20 λεπτά**.
 - Βασικές βιβλιοθήκες: numpy 2.5.3, pandas 3.0.6, ccxt 4.5.85 (με `ccxt.pro`), PyYAML, streamlit 1.64, plotly 7.1, pytest, statsmodels (μόνο για το τεστ σύγκρισης με τον αρχικό κώδικα).
 - Δίκτυο: η Binance (fapi, data.binance.vision, WebSocket) είναι προσβάσιμη. CoinGecko χωρίς API key (λειτούργησε, 50 από 197 νομίσματα δεν αντιστοιχίστηκαν).
-- Tests: `python -m pytest -q` (~15 δευτερόλεπτα, **81 passed**).
+- Tests: `python -m pytest -q` (~15 δευτερόλεπτα, **83 passed**).
 - Μνήμες του Claude για το project: `~/.claude/projects/-home-rigojohn-Documents-CryptoPairsBot/memory/` (φορτώνονται αυτόματα). Τελευταίο plan: `~/.claude/plans/kalman-fuzzy-ullman.md`.
 
 ---
@@ -94,7 +106,7 @@ cryptopairs/
                widgets.py (Ctx, sidebar με what-if form, KPI, status strip),
                views/ overview, pair, backtest, executions, controls, logs
 config/config.yaml   όλες οι ρυθμίσεις
-tests/               81 tests (core, backtest με σύγκριση με τον αρχικό κώδικα, funnel,
+tests/               83 tests (core, backtest με σύγκριση με τον αρχικό κώδικα, funnel,
                      runtime, execution, persistence/crash, dashboard/controls)
 data/                klines/1h, funding, meta/chains.csv (197 νομίσματα, 2023-06 .. 2026-09)
 runs/                latest (strict), hardened, kalman (K1 = ΤΡΕΧΕΙ), kalman_ts (K2),
@@ -103,7 +115,7 @@ state/               paper.db (τρέχον) + αρχειοθετημένες β
 logs/                paper.log, research.log, experiments.log, ...
 notebooks/algorithm_explained.ipynb   εξήγηση του αλγορίθμου στα ελληνικά (OLS, παλιά έκδοση)
 legacy/              ο αρχικός κώδικας (για το τεστ σύγκρισης)
-Dockerfile, docker-compose.yml, DEPLOY.md (ελληνικός οδηγός VPS), README.md
+Dockerfile, docker-compose.yml (bot + dashboard), deploy.sh, DEPLOY.md (ελληνικός οδηγός VPS), README.md
 requirements.txt, requirements-bot.txt, requirements-dashboard.txt, pyproject.toml
 ```
 
@@ -259,6 +271,22 @@ Profile `kalman_ts` = K2: το ίδιο, συν χρονικό όριο 3 half-l
 9. **pandas 3:** οι μονάδες των datetime ποικίλλουν (`.dt.as_unit("ms")`)· `Timestamp.value` είναι πάντα ns.
 10. **Streamlit fragments:** δεν γράφουν σε containers ή στο sidebar που φτιάχτηκαν έξω από αυτά. Γι' αυτό το sidebar είναι εκτός fragment, και κάθε σελίδα έχει το δικό της fragment.
 11. **Streamlit θέμα:** το `.streamlit/config.toml` διαβάζεται από τον φάκελο εκκίνησης και μόνο στην εκκίνηση. Το `cli.py` ξεκινά το Streamlit από τη ρίζα του project με απόλυτες διαδρομές.
+13. **Live ενημέρωση χωρίς τρεμόπαιγμα:**
+    - Το `st.plotly_chart` ξαναχτίζει το γράφημα σε κάθε αλλαγή δεδομένων, γιατί το id του περιλαμβάνει το figure, και χάνει το zoom. Στις σελίδες που ανανεώνονται χρησιμοποιείται το `ui/live.py`: component v2 με σταθερό key που κάνει `Plotly.react` με `uirevision`. Επαληθεύτηκε σε headless Firefox: ίδιο DOM node, νέα δεδομένα, το zoom μένει.
+    - Οι πίνακες θέλουν `key=`, γιατί αλλιώς ξαναδημιουργούνται και χάνουν το scroll.
+    - Το CSS καταργεί το fade των στοιχείων που ξαναϋπολογίζονται (`[data-stale]`) και την ένδειξη «Running».
+    - Το παλαιότερο live ιστορικό αραιώνεται σε 1 σημείο/λεπτό (`data.thinned`).
+16. **«Κολλημένα» δεδομένα (23:00):** με το bot να τρέχει, μια φρέσκια καρτέλα ενημερωνόταν κανονικά. Ο χρήστης έβλεπε «κολλημένο», για τρεις λόγους:
+    - στο διάγραμμα 7 ημερών οι αλλαγές ανά 5 s είναι αόρατες;
+    - μια σελίδα που είχε χάσει τη σύνδεση δεν το έδειχνε, γιατί είχα κρύψει το status widget;
+    - μετά από αλλαγές κώδικα, το runOnSave ξαναφόρτωνε τις σελίδες αλλά όχι τα modules, και οι σελίδες έβγαζαν σφάλματα.
+    Διορθώσεις:
+    - **watchdog badge** (πάνω δεξιά), που τρέχει στον browser κάθε 1 s: δείχνει «LIVE · prices Xs old · page Ys ago», γίνεται κόκκινο αν χαθεί η σύνδεση και κάνει αυτόματο reload στα ~45 s;
+    - **live γραφήματα 60 λεπτών** (Overview: equity, Pair monitor: τιμές % και Z), που κόβουν τη γραμμή στα κενά (`charts._with_gaps`);
+    - το `dashboard.py` κάνει **reload τα ui modules** όταν αλλάζουν τα αρχεία τους.
+    Επαληθεύτηκε στο dashboard του χρήστη (8501) με headless Firefox: 5 σελίδες χωρίς σφάλματα, οι τιμές αλλάζουν, τα γραφήματα μένουν στη θέση τους. Επίσης, το σενάριο restart του server δείχνει κόκκινο badge και μετά επαναφορά.
+14. **Έλεγχος εμφάνισης:** υπάρχει headless Firefox μέσω Marionette (script στο scratchpad, ξεχωριστό προφίλ). Το Streamlit κάνει scroll στο `stMain` και όχι στο document. Μην κάνεις `pkill -f` με μοτίβο που υπάρχει στην ίδια εντολή bash, γιατί σκοτώνει το shell (exit 144).
+15. **Εμφάνιση dashboard:** οι κάρτες KPI είναι CSS grid (4 ανά σειρά, 8 από 1820px πλάτος), με `st.container(horizontal=True, key="kpi_*")`. Οι άξονες Plotly έχουν `automargin`. Το `toolbarMode = "viewer"` κρύβει Deploy και τα αναδυόμενα του Streamlit. Οι πίνακες έχουν `placeholder=""` (όχι «None»). Ο άξονας Z περιλαμβάνει και το live Z.
 12. **`select_slider`:** αν η τρέχουσα τιμή δεν είναι στις επιλογές, «κουμπώνει» στην πλησιέστερη. Τότε ένα «Recalculate» χωρίς αλλαγή θα άλλαζε την παράμετρο, γι' αυτό η τρέχουσα τιμή μπαίνει πάντα στις επιλογές.
 
 ---
@@ -269,7 +297,7 @@ Profile `kalman_ts` = K2: το ίδιο, συν χρονικό όριο 3 half-l
 cd ~/Documents/CryptoPairsBot && source .venv/bin/activate
 
 # paper bot (K1). Χωρίς --fresh = συνέχεια με τις θέσεις· --fresh = νέα αρχή (αρχειοθέτηση)
-python -m cryptopairs --profile kalman paper --pairs runs/kalman/pairs.yaml
+python -m cryptopairs --profile kalman paper     # pairs: runs/kalman/pairs.yaml (αυτόματα από το profile)
 python -m cryptopairs dashboard                 # http://localhost:8501
 python -m cryptopairs status                    # σύνοψη στο terminal
 python -m cryptopairs export                    # CSV στο exports/
@@ -282,7 +310,7 @@ python -m cryptopairs --profile hardened research --tag <tag> --top 20
 python -m cryptopairs --profile hardened experiments --only V0 K1 K2 --out runs/<φάκελος>
 python -m cryptopairs backtest BANDUSDT NKNUSDT --lookback 4320 --z-entry 1.0 --z-exit 0.0
 
-python -m pytest -q                             # 81 tests
+python -m pytest -q                             # 83 tests
 ```
 
 Επανεκκίνηση του bot χρειάζεται μετά από **κάθε** αλλαγή κώδικα ή ρυθμίσεων (χωρίς `--fresh`, εκτός αν αλλάζει το μοντέλο ή οι θέσεις είναι λάθος). Το dashboard ξαναφορτώνεται μόνο του (`runOnSave`).

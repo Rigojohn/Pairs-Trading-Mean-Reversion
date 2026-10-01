@@ -49,13 +49,13 @@ def live() -> None:
             view = view.tail(int(n_lines))
             if newest_first:
                 view = view.iloc[::-1]
-            k = st.columns(4)
-            k[0].metric("Lines shown", f"{len(view):,}", f"of {len(log):,} in the tail", delta_color="off")
-            k[1].metric("Warnings", f"{int((log['level'] == 'WARNING').sum())}")
-            k[2].metric("Errors", f"{int(log['level'].isin(['ERROR', 'CRITICAL']).sum())}")
+            k = W.kpis("logs")
+            k.metric("Lines shown", f"{len(view):,}", f"of {len(log):,} in the tail", delta_color="off", delta_arrow="off")
+            k.metric("Warnings", f"{int((log['level'] == 'WARNING').sum())}")
+            k.metric("Errors", f"{int(log['level'].isin(['ERROR', 'CRITICAL']).sum())}")
             last = log["time"].iloc[-1]
-            k[3].metric("Last line", f"{last:%H:%M:%S}" if pd.notna(last) else "—", "local time", delta_color="off")
-            st.dataframe(view.style.map(_level_color, subset=["level"]), width="stretch", hide_index=True, height=560,
+            k.metric("Last line", f"{last:%H:%M:%S}" if pd.notna(last) else "—", "local time", delta_color="off", delta_arrow="off")
+            st.dataframe(view.style.map(_level_color, subset=["level"]), width="stretch", hide_index=True, placeholder="", height=560,
                          key="lg_tail",
                          column_config={"time": st.column_config.DatetimeColumn("time (local)", format="MM-DD HH:mm:ss"),
                                         "message": st.column_config.TextColumn(width="large")})
@@ -73,7 +73,7 @@ def live() -> None:
                 "time (UTC)": D.to_time(e["ts"]), "event": e["kind"], "pair": e["pair_id"].fillna(""),
                 "details": e["payload"].fillna("").map(lambda s: "" if s in ("", "{}") else ", ".join(
                     f"{k}={v}" for k, v in json.loads(s).items())),
-            }), width="stretch", hide_index=True, height=560, key="lg_events",
+            }), width="stretch", hide_index=True, placeholder="", height=560, key="lg_events",
                 column_config={"time (UTC)": st.column_config.DatetimeColumn(format="MM-DD HH:mm:ss"),
                                "details": st.column_config.TextColumn(width="large")})
 

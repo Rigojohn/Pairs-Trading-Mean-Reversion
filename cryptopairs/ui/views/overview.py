@@ -39,6 +39,9 @@ def live() -> None:
     W.kpi_row(d, ctx, curve, rows, capital, cfg)
     view = rows[rows["pair"].isin(ctx.view_pairs)]
 
+    heading("Live · equity over the last 60 minutes (bot marks every ~5 s)")
+    LIVE.chart(C.live_equity_chart(d["equity_live"], capital), key="ov_live", rev="ov_live")
+
     left, right = st.columns([3, 2], gap="medium")
     with left:
         heading(f"Equity & drawdown · {ctx.window}")
@@ -55,10 +58,10 @@ def live() -> None:
     if book.empty:
         st.caption("No open positions.")
     else:
-        cols = ["pair", "position", "since", "hours", "qty A", "entry A", "mark A", "qty B", "entry B", "mark B",
-                "notional", "beta", "spread entry", "spread now", "Z at entry", "Z now", "to exit", "unrealized",
-                "unrealized %", "to stop %", "to catastrophe %", "funding", "status"]
-        fmt = {"hours": "{:.1f}", "qty A": "{:,.4g}", "qty B": "{:,.4g}", "entry A": "{:.6g}", "mark A": "{:.6g}",
+        cols = ["pair", "position", "unrealized", "unrealized %", "Z at entry", "Z now", "to exit", "to stop %",
+                "notional", "since", "hours", "spread entry", "spread now", "beta", "qty A", "entry A", "mark A",
+                "qty B", "entry B", "mark B", "to catastrophe %", "funding", "status"]
+        fmt = {"hours": "{:.1f}", "qty A": "{:,.6g}", "qty B": "{:,.6g}", "entry A": "{:.6g}", "mark A": "{:.6g}",
                "entry B": "{:.6g}", "mark B": "{:.6g}", "notional": "{:,.2f}", "beta": "{:.4f}",
                "spread entry": "{:+.4f}", "spread now": "{:+.4f}", "Z at entry": "{:+.2f}", "Z now": "{:+.2f}",
                "to exit": "{:+.2f}", "unrealized": "{:+,.4f}", "unrealized %": "{:+.2f}%", "to stop %": "{:.1f}%",
@@ -67,7 +70,7 @@ def live() -> None:
             book[cols].style.format(fmt, na_rep="")
             .map(_color_sign, subset=["unrealized", "unrealized %", "funding"])
             .map(_color_stop, subset=["to stop %", "to catastrophe %"]),
-            width="stretch", hide_index=True, key="ov_book",
+            width="stretch", hide_index=True, placeholder="", key="ov_book",
             column_config={"since": st.column_config.DatetimeColumn("since (UTC)", format="MM-DD HH:mm"),
                            "position": st.column_config.TextColumn("side")})
         st.caption("Spread = log A − α − β·log B with the fit frozen at entry. 'to exit': Z distance still to travel "
@@ -84,7 +87,7 @@ def live() -> None:
             .map(_color_sign, subset=["PnL", "PnL %"])
             .map(lambda v: f"color: {AMBER}; font-weight: 600" if isinstance(v, float) and v <= 0.25 else "",
                  subset=["to entry"]),
-            width="stretch", hide_index=True, height=min(38 + 35 * len(view), 640), key="ov_signals")
+            width="stretch", hide_index=True, placeholder="", height=min(38 + 35 * len(view), 640), key="ov_signals")
         st.caption("'to entry' ≤ 0 = an entry signal now (taken at the next hourly close if the filters agree); "
                    "amber = within 0.25 of a signal.")
     with b:

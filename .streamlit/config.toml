@@ -5,6 +5,10 @@
 # Serves cryptopairs/static (plotly.js for the live charts, copied there on start-up).
 enableStaticServing = true
 
+[client]
+# A desk, not an editor: no Deploy button, developer menu or promotional pop-ups.
+toolbarMode = "viewer"
+
 [theme]
 base = "dark"
 primaryColor = "#f0b429"

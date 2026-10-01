@@ -18,13 +18,44 @@ environment variables or the arguments below.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 import streamlit as st
 
-from cryptopairs.ui import live, theme
-from cryptopairs.ui.widgets import sidebar
+# Modules the pages use, in dependency order. Streamlit re-reads the page files when they change
+# (runOnSave), but keeps already-imported modules; reloading them as well keeps both in step,
+# so a code update never leaves a running dashboard half old, half new.
+CODE = ["cryptopairs.runtime.store", "cryptopairs.ui.theme", "cryptopairs.ui.data", "cryptopairs.ui.lab",
+        "cryptopairs.ui.live", "cryptopairs.ui.charts", "cryptopairs.ui.widgets"]
+_reload_lock = threading.Lock()
+
+
+def _reload_updated_code() -> None:
+    import cryptopairs.ui as pkg
+
+    with _reload_lock:
+        loaded_at = getattr(pkg, "_loaded_at", None)
+        if loaded_at is None:  # first run of this process: anything newer than its start is stale
+            try:
+                loaded_at = os.stat(f"/proc/{os.getpid()}").st_mtime
+            except OSError:
+                loaded_at = time.time()
+        mods = [sys.modules[m] for m in CODE if m in sys.modules]
+        if any(Path(m.__file__).stat().st_mtime > loaded_at for m in mods):
+            for m in mods:
+                importlib.reload(m)
+        pkg._loaded_at = time.time()
+
+
+_reload_updated_code()
+
+from cryptopairs.ui import live, theme  # noqa: E402 - after the reload above
+from cryptopairs.ui.widgets import sidebar  # noqa: E402
 
 VIEWS = Path(__file__).resolve().parent / "ui" / "views"
 PAGES = [  # (file, title, icon, url)

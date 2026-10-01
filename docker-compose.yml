@@ -20,3 +20,28 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  dashboard:
+    build: .                          # same Dockerfile as the bot: the second build comes from the cache
+    container_name: cryptopairs-dashboard
+    restart: unless-stopped
+    command: ["dashboard", "--no-browser", "--address", "0.0.0.0", "--port", "8501"]
+    # Reachable only from the server itself; open it from your computer through an SSH tunnel
+    # (DEPLOY.md). It has no password and its buttons control the bot: never publish "8501:8501".
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./state:/app/state            # reads the bot's database and writes the button commands into it
+      - ./logs:/app/logs              # System logs page
+      - ./config:/app/config:ro
+      - ./data:/app/data:ro           # history for the Backtest lab (empty unless data/ is copied over)
+    environment:
+      - TZ=UTC
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none   # the code does not change under a running server
+    # Python is not PID 1 here, so `docker compose stop` ends the dashboard at once.
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

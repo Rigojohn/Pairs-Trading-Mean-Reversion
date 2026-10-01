@@ -17,12 +17,14 @@ pio.templates["desk"] = go.layout.Template(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color=TEXT, size=12),
         colorway=[BLUE, AMBER, GREEN, RED, VIOLET, CYAN, "#f472b6", "#94a3b8"],
-        xaxis=dict(gridcolor=GRID, zerolinecolor=BORDER, linecolor=BORDER, showspikes=True,
+        xaxis=dict(gridcolor=GRID, zerolinecolor=BORDER, linecolor=BORDER, showspikes=True, automargin=True,
                    spikecolor=MUTED, spikethickness=1, spikedash="dot", spikemode="across"),
-        yaxis=dict(gridcolor=GRID, zerolinecolor=BORDER, linecolor=BORDER),
+        yaxis=dict(gridcolor=GRID, zerolinecolor=BORDER, linecolor=BORDER, automargin=True, title=dict(standoff=8)),
         hoverlabel=dict(bgcolor=PANEL_2, bordercolor=BORDER, font=dict(color=TEXT)),
-        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=1.02, yanchor="bottom", x=0, font=dict(color=MUTED)),
-        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=1.02, yanchor="bottom", x=0, xanchor="left",
+                    font=dict(color=MUTED, size=11)),
+        modebar=dict(bgcolor="rgba(0,0,0,0)", color=MUTED, activecolor=AMBER),
+        margin=dict(l=10, r=10, t=36, b=10),
         hovermode="x unified",
     )
 )
@@ -30,11 +32,38 @@ pio.templates.default = "desk"
 
 CSS = f"""
 <style>
-.block-container {{ padding-top: 2.2rem; padding-bottom: 2rem; max-width: 100%; }}
+.block-container {{ padding-top: 4.6rem; padding-bottom: 2rem; max-width: 100%; }}
+[data-testid="stSkillsNudge"] {{ display: none !important; }}
+/* KPI cards: an even grid (4 per row, 8 on wide screens) instead of squeezed columns */
+[class*="st-key-kpi"] {{ display: grid !important; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: .6rem !important; }}
+[class*="st-key-kpi"] > [data-testid="stElementContainer"] {{ width: auto !important; min-width: 0 !important; }}
+[class*="st-key-kpi"] > [data-testid="stElementContainer"] > div,
+[class*="st-key-kpi"] [data-testid="stMetric"] {{ height: 100%; }}
+.st-key-kpi_overview, .st-key-kpi_pair {{ grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }}
+@media (min-width: 1820px) {{
+  .st-key-kpi_overview, .st-key-kpi_pair {{ grid-template-columns: repeat(8, minmax(0, 1fr)) !important; }}
+}}
+[data-testid="stMetric"] {{ min-height: 104px; }}
+[data-testid="stMetricLabel"] p {{ white-space: normal; line-height: 1.25; }}
+[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] div {{ white-space: normal !important;
+  overflow: visible !important; text-overflow: clip !important; }}
+.down {{ background: rgba(246,70,93,.12); border: 1px solid rgba(246,70,93,.55); border-radius: 8px;
+         padding: 12px 16px; margin-bottom: 12px; color: {TEXT}; font-size: .92rem; line-height: 1.5; }}
+.down b {{ color: {RED}; }}
+.down code {{ background: rgba(0,0,0,.35); padding: 1px 6px; border-radius: 4px; font-size: .84rem; }}
 /* Live updates without the "reloading" look: Streamlit fades elements being recomputed
    (opacity .33 after 0.5 s) and shows a running badge; a live screen should just tick. */
 [data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
-[data-testid="stStatusWidget"] {{ visibility: hidden; }}
+[data-testid="stStatusWidgetRunningIcon"], [data-testid="stStatusWidgetRunningManIcon"],
+[data-testid="stStatusWidget"] button {{ display: none !important; }}
+#cp-watchdog {{ position: fixed; top: 16px; right: 64px; z-index: 999990; font-size: .76rem; font-weight: 600;
+  letter-spacing: .03em; padding: 4px 11px; border-radius: 999px; border: 1px solid {BORDER};
+  background: {PANEL}; font-variant-numeric: tabular-nums; pointer-events: none; }}
+#cp-watchdog.ok {{ color: {GREEN}; border-color: rgba(46,189,133,.45); }}
+#cp-watchdog.warn {{ color: {AMBER}; border-color: rgba(240,180,41,.55); }}
+#cp-watchdog.bad {{ color: #fff; background: {RED}; border-color: {RED}; }}
+#cp-watchdog.mute {{ color: {MUTED}; }}
 [data-testid="stSkeleton"] {{ display: none; }}
 [data-testid="stMetric"] {{
   background: {PANEL}; border: 1px solid {BORDER}; border-radius: 8px; padding: 10px 14px 8px 14px;

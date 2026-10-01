@@ -44,7 +44,7 @@
 
 ## 2. Περιβάλλον
 
-- Φάκελος: `/home/rigojohn/Documents/CryptoPairsBot`. Venv: `.venv` (Python 3.12). Δεν είναι git repo.
+- Φάκελος: `/home/rigojohn/Documents/CryptoPairsBot`. Venv: `.venv` (Python 3.12). Git repo (branch `main`), remote: private `https://github.com/Rigojohn/Pairs-Trading-Mean-Reversion` (το παλιό του περιεχόμενο αντικαταστάθηκε με force push στις 2026-10-01). Δεν ανεβαίνουν: `data/`, `state/`, `logs/`, το PDF, το zip, και από το `runs/` μόνο τα `pairs.yaml`.
 - Υπολογιστής χρήστη: i5-4590 (4 πυρήνες), 7,7 GB RAM (~2,7 GB ελεύθερα), Linux.
   - Ένα backtest 2 ετών παίρνει **~50 ms**.
   - Βαθμονόμηση 100 ζευγών: **~2 λεπτά** (3 workers).

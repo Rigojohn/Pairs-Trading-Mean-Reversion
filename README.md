@@ -1,6 +1,6 @@
 # CryptoPairsBot
 
-Bot για pairs trading σε Binance USDⓈ-M perpetuals, βασισμένο στο paper των Stoikov et al., *Pairs Trading in Crypto* (`ssrn-6188418.pdf`).
+Bot για pairs trading σε Binance USDⓈ-M perpetuals, βασισμένο στο paper των Stoikov et al., *Pairs Trading in Crypto*.
 
 ## Δομή
 

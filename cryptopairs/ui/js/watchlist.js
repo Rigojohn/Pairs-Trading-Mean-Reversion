@@ -21,20 +21,21 @@ function cpWlRow(r, focus) {
 // A click sent while the app is still running (a first load can take 10-40 s) is dropped by
 // Streamlit, and sending it again then restarts the run, so the page would never finish. The
 // click therefore waits until the app is idle, is sent once, and only if that pair's desk is
-// still not on screen 4 s later is it sent again (at most 5 times, within a minute).
+// still not on screen 20 s later is it sent again (at most 3 times). A shorter wait is harmful: a page run takes 5-10 s on the server,
+// and every re-send restarts it, so the page never finishes.
 function cpWlDelivered(el) {
   return el._focus === el._pending && /\/pair\/?$/.test(location.pathname);
 }
 
 function cpWlFlush(el) {
   if (!el._pending) return;
-  if (cpWlDelivered(el) || el._tries >= 5 || Date.now() - el._since > 60000) { el._pending = null; return; }
+  if (cpWlDelivered(el) || (el._tries >= 3 && Date.now() - el._sent > 20000) || Date.now() - el._since > 90000) { el._pending = null; return; }
   const running = !!document.querySelector('[data-testid="stStatusWidget"]');
   if (!running) el._idle = true;
   // only the first load must not be interrupted. The live refresh keeps the app "running" almost all
   // the time, so once the list has been redrawn a few times (the app answers) the click goes out anyway
   if (running && !el._idle && !(el._renders >= 3)) return;
-  if (el._sent && Date.now() - el._sent < 4000) return;  // give the last one time to land
+  if (el._tries >= 3 || (el._sent && Date.now() - el._sent < 20000)) return;  // give the last one time to land
   el._tries += 1;
   el._sent = Date.now();
   el._send("pick", el._pending);

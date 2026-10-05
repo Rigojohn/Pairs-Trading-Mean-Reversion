@@ -140,6 +140,16 @@ def book_summary(rows: pd.DataFrame, nav: float) -> dict:
             "net_x": net / nav if nav else math.nan, "open": len(open_), "pairs": len(rows)}
 
 
+def funding_day(qty: float, px: float, inst: dict | None) -> float:
+    """USDT per day one leg receives (+) or pays (-) at its current funding rate.
+
+    Longs pay a positive rate and shorts a negative one; legs settle every 8 h, some every 4 h or 1 h."""
+    rate = (inst or {}).get("funding_rate")
+    if rate is None or not np.isfinite(px):
+        return math.nan
+    return -qty * px * float(rate) * 24.0 / float((inst or {}).get("funding_hours") or 8.0)
+
+
 def funding_carry(rows: pd.DataFrame, insts: dict | None) -> pd.Series:
     """USDT per day each open pair receives (+) or pays (-) at the legs' current funding rates."""
     out = {}
@@ -147,15 +157,8 @@ def funding_carry(rows: pd.DataFrame, insts: dict | None) -> pd.Series:
         if not insts:
             out[r["pair"]] = math.nan
             continue
-        day = 0.0
-        for leg, qty, px in (("sym_a", r["qty A"], r["mark A"]), ("sym_b", r["qty B"], r["mark B"])):
-            i = insts.get(r[leg]) or {}
-            rate = i.get("funding_rate")
-            if rate is None or not np.isfinite(px):
-                day = math.nan
-                break
-            day -= qty * px * float(rate) * 24.0 / float(i.get("funding_hours") or 8.0)  # longs pay a positive rate
-        out[r["pair"]] = day
+        out[r["pair"]] = (funding_day(r["qty A"], r["mark A"], insts.get(r["sym_a"]))
+                          + funding_day(r["qty B"], r["mark B"], insts.get(r["sym_b"])))
     return pd.Series(out, dtype=float)
 
 

@@ -435,8 +435,9 @@ def position_card(s: PairState) -> None:
              delta_color="off", delta_arrow="off", help="equity headroom as % of the entry equity")
     k.metric("Hedge drift", f"{ratio:.3f}", f"β at entry {float(s.strat.get('beta') or np.nan):.3f}", delta_color="off",
              delta_arrow="off", help="notional B / notional A now vs the hedge ratio the position was sized with")
-    k.metric("Funding · fees", f"{-float(b.get('funding_paid', 0.0)):+,.4f}", f"fees {float(b.get('fees_paid', 0.0)):,.4f}",
-             delta_color="off", delta_arrow="off", help="funding received (+) or paid (−) so far, and all fees of this pair")
+    k.metric("Funding · fees", f"{-float(b.get('funding_paid', 0.0)):+,.4f}", f"fees {-float(b.get('fees_paid', 0.0)):+,.4f}",
+             delta_color="off", delta_arrow="off",
+             help="funding received (+) or paid (−) so far by this pair, and its fees (always a cost, −)")
 
 
 # ----------------------------------------------------------------- profile
@@ -449,7 +450,7 @@ def instruments_table(s: PairState, data_dir: str) -> pd.DataFrame:
     ids = tuple((meta.get(x) or {}).get("coingecko_id", "") for x in (s.id_a, s.id_b))
     cg = M.coingecko(ids)
     rows = {}
-    for sym, sid, cid in ((s.sym_a, s.id_a, ids[0]), (s.sym_b, s.id_b, ids[1])):
+    for sym, sid, cid, leg_side in ((s.sym_a, s.id_a, ids[0], s.side), (s.sym_b, s.id_b, ids[1], -s.side)):
         i = (s.insts or {}).get(sym) or {}
         c = cg.get(cid) or {}
         chains = ", ".join((meta.get(sid) or {}).get("chains", [])[:3]) or "—"
@@ -464,7 +465,8 @@ def instruments_table(s: PairState, data_dir: str) -> pd.DataFrame:
             "24h change": _fmt_pct(i.get("change_pct")),
             "24h volume": f"${i['quote_volume'] / 1e6:,.2f}M" if i.get("quote_volume") else "—",
             "Open interest": f"${i['open_interest'] / 1e6:,.2f}M" if i.get("open_interest") else "—",
-            "Funding": (f"{100 * fr:+.4f}% / {i.get('funding_hours', 8):g}h" if fr is not None else "—"),
+            "Funding": (f"{100 * fr:+.4f}% / {i.get('funding_hours', 8):g}h {D.funding_word(fr, leg_side)}".rstrip()
+                        if fr is not None else "—"),
             "Next funding": D.clock(i["next_funding"]) if i.get("next_funding") else "—",
             "Tick · lot · min notional": (f"{i['tick']:g} · {i['step']:g} · {i['min_notional']:g} USDT"
                                           if i.get("tick") else "—"),
@@ -537,7 +539,7 @@ def track_record(s: PairState, trades: pd.DataFrame, cal: dict | None) -> pd.Dat
                 "Avg PnL / trade": f"{closed['pnl'].mean():+,.4f}",
                 "Avg holding (h)": f"{hold.mean():.1f}",
                 "Stops": f"{closed['reason'].fillna('').str.startswith('stop').sum()}",
-                "Fees · funding": f"{closed['fees'].sum():,.4f} · {closed['funding'].fillna(0).sum():+,.4f}"}
+                "Fees · funding": f"{-closed['fees'].sum():+,.4f} · {-closed['funding'].fillna(0).sum():+,.4f}"}
     calc = {}
     if cal:
         calc = {"Trades": f"{cal.get('test_Trades', math.nan):.0f}", "Win rate": f"{cal.get('test_WinRate', math.nan):.0%}",

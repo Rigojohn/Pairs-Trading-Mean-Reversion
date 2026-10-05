@@ -96,9 +96,11 @@ with st.spinner("Running backtests…"):
 heading("Performance")
 names = list(results)
 metrics = {n: results[n].metrics() for n in names}
+for m in metrics.values():  # shown as PnL, as on the other pages: + received, − paid (fees are always a cost)
+    m["Fees"], m["Funding"] = -m["Fees"], -m["Funding"]
 spec = [("Total return", "TotalRet", "{:+.2%}"), ("Annual return", "AnnRet", "{:+.2%}"), ("Sharpe", "Sharpe", "{:.2f}"),
         ("Annual vol", "AnnVol", "{:.2%}"), ("Max drawdown", "MaxDD", "{:.2%}"), ("Trades", "Trades", "{:.0f}"),
-        ("Win rate", "WinRate", "{:.0%}"), ("Stop-losses", "StopLosses", "{:.0f}"), ("Fees (USDT)", "Fees", "{:,.2f}"),
+        ("Win rate", "WinRate", "{:.0%}"), ("Stop-losses", "StopLosses", "{:.0f}"), ("Fees (USDT)", "Fees", "{:+,.2f}"),
         ("Funding (USDT)", "Funding", "{:+,.2f}"), ("Final equity", "FinalEquity", "{:,.2f}")]
 focus = names[-1]
 kc = W.kpis("lab")
@@ -108,7 +110,7 @@ for label, k, f in [spec[0], spec[2], spec[4], spec[5], spec[6], spec[9]]:
     if focus != "calibrated" and np.isfinite(v) and np.isfinite(ref):
         delta = (f.format(v - ref) if k not in ("Trades",) else f"{v - ref:+.0f}") + " vs calibrated"
     kc.metric(f"{label} · {focus}", f.format(v) if np.isfinite(v) else "—", delta,
-               delta_color="inverse" if k == "Funding" else "normal")
+               delta_color="normal")
 table = pd.DataFrame({n: [f.format(metrics[n][k]) if np.isfinite(metrics[n][k]) else "—" for _, k, f in spec]
                       for n in names}, index=[s[0] for s in spec])
 left, right = st.columns([2, 3], gap="large")
@@ -164,7 +166,7 @@ if tf.empty:
     st.caption("No trades in this period.")
 else:
     st.dataframe(tf.iloc[::-1].style.format({"hours": "{:.0f}", "Z entry": "{:+.2f}", "beta": "{:.4f}", "PnL": "{:+,.2f}",
-                                             "PnL %": "{:+.2f}%", "fees": "{:,.2f}", "funding": "{:+,.2f}"}, na_rep="")
+                                             "PnL %": "{:+.2f}%", "fees": "{:+,.2f}", "funding": "{:+,.2f}"}, na_rep="")
                  .map(lambda v: f"color: {GREEN}" if isinstance(v, float) and v > 0 else
                       (f"color: {RED}" if isinstance(v, float) and v < 0 else ""), subset=["PnL", "PnL %"]),
                  width="stretch", hide_index=True, placeholder="", height=360)

@@ -1,6 +1,6 @@
 // Sidebar watchlist (ui/tv.py watchlist()): every pair with its position, Z and PnL from the
 // bot's live marks. Open positions first, then the flat pairs nearest to an entry signal.
-// A click sends the pair to Python ("pick"), which makes it the focus pair of every page.
+// A click sends the pair to Python ("pick"): it becomes the focus pair of every page and its Pair desk opens.
 
 function cpWlRow(r, focus) {
   const side = r.side > 0 ? '<span class="wl-side long">L</span>' : r.side < 0 ? '<span class="wl-side short">S</span>'
@@ -18,6 +18,24 @@ function cpWlRow(r, focus) {
     + `<span class="wl-pnl ${pcls}">${isFinite(pnl) ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—"}</span></div>`;
 }
 
+// A click sent while the app is still running (a first load can take 10-40 s) is dropped by
+// Streamlit, and sending it again then restarts the run, so the page would never finish. The
+// click therefore waits until the app is idle, is sent once, and only if that pair's desk is
+// still not on screen 4 s later is it sent again (at most 5 times, within a minute).
+function cpWlDelivered(el) {
+  return el._focus === el._pending && /\/pair\/?$/.test(location.pathname);
+}
+
+function cpWlFlush(el) {
+  if (!el._pending) return;
+  if (cpWlDelivered(el) || el._tries >= 5 || Date.now() - el._since > 60000) { el._pending = null; return; }
+  if (document.querySelector('[data-testid="stStatusWidget"]')) return;  // running: never interrupt it
+  if (el._sent && Date.now() - el._sent < 4000) return;  // give the last one time to land
+  el._tries += 1;
+  el._sent = Date.now();
+  el._send("pick", el._pending);
+}
+
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component;
   let el = parentElement.querySelector(".wl");
@@ -30,15 +48,27 @@ export default function (component) {
       if (!row) return;
       el.querySelectorAll(".wl-row.on").forEach((x) => x.classList.remove("on"));
       row.classList.add("on");  // instant feedback; the page follows after the rerun
-      setTriggerValue("pick", row.dataset.id);
+      el._pending = row.dataset.id;
+      el._tries = 0;
+      el._sent = 0;
+      el._since = Date.now();
+      cpWlFlush(el);
     });
+    el._timer = setInterval(() => {
+      if (!el.isConnected) { clearInterval(el._timer); return; }  // a rebuilt sidebar has its own list
+      cpWlFlush(el);
+    }, 400);
   }
+  el._send = setTriggerValue;  // the latest render's callback
+  el._focus = data.focus;
+  if (el._pending && cpWlDelivered(el)) el._pending = null;
+  const shown = el._pending || data.focus;  // a click waiting to be sent keeps its highlight
   const rows = data.rows || [];
   const open = rows.filter((r) => r.side), flat = rows.filter((r) => !r.side);
   const head = (t, n, right) => `<div class="wl-h"><span>${t} · ${n}</span><span>${right}</span></div>`;
-  el.innerHTML = head("Open positions", open.length, "uPnL") + (open.map((r) => cpWlRow(r, data.focus)).join("")
+  el.innerHTML = head("Open positions", open.length, "uPnL") + (open.map((r) => cpWlRow(r, shown)).join("")
       || '<div class="wl-empty">none</div>')
-    + head("Watching", flat.length, "PnL") + flat.map((r) => cpWlRow(r, data.focus)).join("")
+    + head("Watching", flat.length, "PnL") + flat.map((r) => cpWlRow(r, shown)).join("")
     + '<div class="wl-foot">Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
     + '❚❚ paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
 }

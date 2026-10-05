@@ -147,7 +147,7 @@ def live() -> None:
     else:
         blot["carry/day"] = blot["pair"].map(carry)
         blot["carry %"] = 100 * blot["carry/day"] / blot["notional"].where(blot["notional"] > 0)
-        blot["costs"] = blot["fees"] + blot["funding"]
+        blot["costs"] = -(blot["fees"] + blot["funding"])  # as PnL: + received, − paid
         hot = blot[blot["carry %"] <= -CARRY_ALERT]
         if len(hot):
             st.warning("Funding alert: " + "; ".join(
@@ -159,9 +159,9 @@ def live() -> None:
                 "to exit", "to stop %", "carry/day", "carry %", "costs", "beta", "status"]
         fmt = {"hours": "{:.1f}", "notional": "{:,.2f}", "unrealized": "{:+,.4f}", "unrealized %": "{:+.2f}%",
                "Z at entry": "{:+.2f}", "Z now": "{:+.2f}", "to exit": "{:+.2f}", "to stop %": "{:.1f}%",
-               "carry/day": "{:+.4f}", "carry %": "{:+.2f}%", "costs": "{:.4f}", "beta": "{:.3f}"}
+               "carry/day": "{:+.4f}", "carry %": "{:+.2f}%", "costs": "{:+.4f}", "beta": "{:.3f}"}
         sel = st.dataframe(
-            blot[cols].style.format(fmt, na_rep="—").map(_sign, subset=["unrealized", "unrealized %", "carry/day"])
+            blot[cols].style.format(fmt, na_rep="—").map(_sign, subset=["unrealized", "unrealized %", "carry/day", "costs"])
             .map(_stop, subset=["to stop %"])
             .map(lambda v: f"color: {RED}; font-weight: 700" if isinstance(v, float) and v <= -CARRY_ALERT else "",
                  subset=["carry %"]),
@@ -169,7 +169,8 @@ def live() -> None:
             selection_mode="single-row",
             column_config={"since": st.column_config.DatetimeColumn("since", format="DD/MM HH:mm"),
                            "position": st.column_config.TextColumn("side"),
-                           "costs": st.column_config.NumberColumn("fees + funding", help="paid so far by this pair"),
+                           "costs": st.column_config.NumberColumn("fees + funding", help="so far, as PnL: + received, − paid "
+                                                                   "(fees are always a cost)"),
                            "carry %": st.column_config.NumberColumn("carry %/day", help="funding per day as % of the "
                                                                     "position's gross notional")})
         picked = sel.selection.rows if sel is not None and hasattr(sel, "selection") else []
@@ -177,7 +178,8 @@ def live() -> None:
             _actions(blot.iloc[picked[0]], d)
         else:
             st.caption("'to exit': Z still to travel to the exit band. 'to stop %': equity headroom before the "
-                       "stop-loss, as % of the entry equity. 'carry/day': funding at the current rates.")
+                       "stop-loss, as % of the entry equity. 'carry/day': funding per day at the current rates. Funding "
+                       "and fees: + received, − paid.")
 
     a, b = st.columns([3, 2], gap="medium")
     with a:

@@ -225,6 +225,7 @@ def surface_cached(_data: PairData, _fits, _cfg: AppConfig, key: tuple, what_if:
 
 
 def trades_frame(res: BacktestResult) -> pd.DataFrame:
+    """Backtest trades for a table; fees and funding as PnL (+ received, − paid), as on the Pair desk."""
     t = res.trades_frame()
     if t.empty:
         return t
@@ -237,5 +238,5 @@ def trades_frame(res: BacktestResult) -> pd.DataFrame:
         "exit": D.to_time(t["exit_ts"]),
         "hours": (t["exit_ts"] - t["entry_ts"]) / HOUR,
         "Z entry": t["z_entry"], "beta": t["beta"], "reason": t["reason"].fillna("open"),
-        "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": t["fees"], "funding": t["funding"],
+        "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": -t["fees"], "funding": -t["funding"],
     })

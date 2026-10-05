@@ -11,7 +11,7 @@ A multi-page web app on top of the bot's state database (read-only):
   System logs     live tail of the bot's log with filters, and the event journal
 
 The sidebar picks the bot and holds the live watchlist (a click makes a pair the focus of every
-page) and a View menu (focus pair, history window, refresh rate, pairs in view). The what-if
+page and opens its Pair desk) and a View menu (focus pair, history window, refresh rate, pairs in view). The what-if
 parameters sit on the Pair desk and in the Backtest lab. Times are shown in Athens time
 (CRYPTOPAIRS_TZ to change it).
 The dashboard never trades: buttons only queue a command that the bot validates and runs
@@ -105,6 +105,9 @@ def main() -> None:
     page = st.navigation(pages, position="top")
     if ctx is None:
         st.stop()
+    # A click on a pair in the sidebar watchlist made it the focus pair; take the user to its desk.
+    if st.session_state.pop("_open_desk", False) and page.url_path != "pair":
+        st.switch_page(next(p for p in pages if p.url_path == "pair"))
     st.session_state["ctx"] = ctx
     page.run()
 

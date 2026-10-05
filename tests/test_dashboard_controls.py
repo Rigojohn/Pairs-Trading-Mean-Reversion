@@ -382,6 +382,21 @@ def test_watchlist_puts_open_positions_first_and_a_pick_moves_the_focus(tmp_path
     assert at.session_state["focus"] == "AAA_BBB" and "_focus_pick" not in at.session_state
 
 
+def test_a_click_in_the_watchlist_opens_that_pairs_desk(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    _populated(tmp_path)
+    at = _app(tmp_path, monkeypatch)
+    at.run()  # the default page: Overview
+    assert not at.exception, at.exception
+    assert "pd_view" not in at.session_state
+    at.session_state["_focus_pick"] = "AAA_BBB"  # what a click in the watchlist leaves for the next run
+    at.session_state["_open_desk"] = True
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["focus"] == "AAA_BBB" and "_open_desk" not in at.session_state
+    assert "pd_view" in at.session_state  # the Pair desk ran (its chart selector exists)
+
+
 def test_log_reader_keeps_tracebacks_with_their_line(tmp_path):
     from cryptopairs.ui.data import read_log
 

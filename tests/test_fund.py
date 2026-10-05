@@ -210,3 +210,28 @@ def test_capital_added_later_is_a_deposit_not_a_gain():
                          "equity": [205.0, 209.0, 359.0]})  # the last one: start-up evaluation of s3
     adj = D.with_capital(bars, bars["bar_ts"] + 1_000, steps, sessions)
     assert adj["equity"].tolist() == [355.0, 359.0, 359.0]
+
+
+def test_funding_is_shown_as_pnl_with_who_pays():
+    from cryptopairs.ui import data as D
+
+    # Longs pay a positive rate, shorts a negative one.
+    assert D.funding_word(0.0001, +1) == "you pay" and D.funding_word(0.0001, -1) == "you receive"
+    assert D.funding_word(-0.0029, -1) == "you pay" and D.funding_word(-0.0029, +1) == "you receive"
+    assert D.funding_word(0.0001) == "longs pay" and D.funding_word(-0.0029) == "shorts pay"
+    assert D.funding_word(None, 1) == "" and D.funding_word(0.0, 1) == ""
+    trades = pd.DataFrame([{"pair_id": "P", "side": 1, "entry_reason": "signal", "entry_ts": 3_600_000, "exit_ts": 7_200_000,
+                            "z_entry": -2.0, "beta": 0.8, "reason": "signal", "pnl": 1.0, "equity_before": 100.0,
+                            "fees": 0.0664, "funding": 0.0834}])  # stored as paid
+    tv = D.trade_view(trades)
+    assert tv["funding"].iloc[0] == pytest.approx(-0.0834) and tv["fees"].iloc[0] == pytest.approx(-0.0664)
+
+
+def test_daily_funding_of_a_short_on_a_negative_rate_is_a_cost():
+    rows = pd.DataFrame([{"pair": "OGN_ANKR", "side": -1, "sym_a": "OGN", "sym_b": "ANKR",
+                          "qty A": -4758.0, "mark A": 0.02147, "qty B": 19694.0, "mark B": 0.00497}])
+    insts = {"OGN": {"funding_rate": -0.0028955, "funding_hours": 4.0},
+             "ANKR": {"funding_rate": 0.00005, "funding_hours": 4.0}}
+    day = F.funding_carry(rows, insts)["OGN_ANKR"]
+    per_settlement = -(4758 * 0.02147 * 0.0028955) - 19694 * 0.00497 * 0.00005  # short OGN pays, long ANKR pays
+    assert day == pytest.approx(6 * per_settlement) and day < 0  # every 4 h

@@ -78,7 +78,7 @@ def _pair_label(p: dict, overrides: dict) -> str:
 
 
 def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, default_db: str | None) -> Ctx | None:
-    """The bot, a compact view menu and the live watchlist (a click picks the focus pair)."""
+    """The bot, a compact view menu and the live watchlist (a click picks the focus pair and opens its desk)."""
     dbs = sorted(p.name for p in state_dir.glob("*.db"))
     with st.sidebar:
         st.html('<div style="font-size:1.15rem;font-weight:700;letter-spacing:.02em">CryptoPairs '
@@ -153,8 +153,9 @@ def _watchlist(db_path: Path, since_ms: int, refresh: int, focus: str) -> None:
         pending = set(D.query(str(db_path), "SELECT DISTINCT pair_id FROM orders WHERE status='pending'")
                       .get("pair_id", pd.Series(dtype=str)))
         pick = TV.watchlist(watchlist_rows(rows, pending), focus)
-        if pick and pick != focus:
+        if pick:  # every click, also on the pair already in focus: it opens that pair's desk
             st.session_state["_focus_pick"] = pick
+            st.session_state["_open_desk"] = True
             st.rerun()
 
     watch()

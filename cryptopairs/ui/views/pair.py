@@ -14,6 +14,7 @@ import streamlit as st
 
 from cryptopairs.ui import data as D
 from cryptopairs.ui import desk as K
+from cryptopairs.ui import fund as F
 from cryptopairs.ui import history as HI
 from cryptopairs.ui import lab as L
 from cryptopairs.ui import live as LIVE
@@ -118,9 +119,20 @@ def desk() -> None:
     g.metric("σ in use", f"{s.strat['sigma']:.4f}" if s.strat.get("sigma") else "—",
              f"model {fit_last['kf_sigma']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_sigma"]) else None, **info)
     ia, ib = ((s.insts or {}).get(s.sym_a) or {}), ((s.insts or {}).get(s.sym_b) or {})
-    fr = [x.get("funding_rate") for x in (ia, ib)]
-    g.metric("Funding", " / ".join("—" if x is None else f"{100 * x:+.3f}%" for x in fr), f"{a} / {b} · next settlement",
-             **info, help="current funding rates of the legs (longs pay a positive rate)")
+    legs = [(a, ia.get("funding_rate"), s.side), (b, ib.get("funding_rate"), -s.side)]  # long spread = long A, short B
+    if s.side:  # per day for this position, and each leg's share; the rates are under the order books
+        day_a = F.funding_day(r["qty A"], r["mark A"], ia)
+        day_b = F.funding_day(r["qty B"], r["mark B"], ib)
+        day = day_a + day_b
+        g.metric("Funding", f"{day:+,.3f} / day" if np.isfinite(day) else "—",
+                 " · ".join(f"{n} {v:+,.2f}" if np.isfinite(v) else f"{n} —" for n, v in ((a, day_a), (b, day_b))),
+                 **info, help="USDT per day this position receives (+) or pays (−) at the legs' current rates, in total "
+                              "and per coin. Longs pay a positive rate, shorts a negative one; under each order book: "
+                              "the rate and whether you pay or receive it.")
+    else:  # the rates are the value; the caption says who pays each
+        g.metric("Funding", " / ".join("—" if x is None else f"{100 * x:+.3f}%" for _, x, _ in legs),
+                 " · ".join(f"{n} {D.funding_word(x)}".rstrip() for n, x, _ in legs), **info,
+                 help="current rates of the legs. Longs pay a positive rate, shorts a negative one.")
     g.metric("Realized", f"{r['realized']:+,.4f}", f"{int(r['trades'])} trades · {int(r['wins'])} won", **info)
 
     trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
@@ -247,8 +259,9 @@ def profile() -> None:
     if len(trades):
         heading("Trades of this pair")
         tv = D.trade_view(trades.iloc[::-1])
+        st.caption("fees and funding: + received, − paid")
         st.dataframe(tv.style.format({"hours": "{:.1f}", "Z entry": "{:+.2f}", "beta": "{:.4f}", "PnL": "{:+,.4f}",
-                                      "PnL %": "{:+.2f}%", "fees": "{:.4f}", "funding": "{:+.4f}"}, na_rep="")
+                                      "PnL %": "{:+.2f}%", "fees": "{:+.4f}", "funding": "{:+.4f}"}, na_rep="")
                      .map(lambda v: f"color: {AMBER}" if v == "manual" else "", subset=["origin"]),
                      width="stretch", hide_index=True, placeholder="", key="pd_trades")
 

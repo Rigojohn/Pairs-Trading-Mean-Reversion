@@ -393,7 +393,18 @@ def executions(events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def funding_word(rate, leg_side: int = 0) -> str:
+    """What a funding rate means. Longs pay a positive rate and shorts a negative one, so for a
+    leg held long (+1) or short (-1) it is "you pay" or "you receive"; with no position, who pays."""
+    if rate is None or not np.isfinite(rate) or rate == 0:
+        return ""
+    if not leg_side:
+        return "longs pay" if rate > 0 else "shorts pay"
+    return "you pay" if leg_side * rate > 0 else "you receive"
+
+
 def trade_view(t: pd.DataFrame) -> pd.DataFrame:
+    """Trades for a table. Fees and funding as PnL: + received, − paid (fees are always a cost)."""
     t = t.copy()
     for col in ("exit_ts", "entry_ts", "pnl", "fees", "funding", "z_entry", "beta", "equity_before"):
         t[col] = pd.to_numeric(t[col], errors="coerce")
@@ -405,7 +416,7 @@ def trade_view(t: pd.DataFrame) -> pd.DataFrame:
         "entry": to_time(entry), "exit": to_time(exit_),
         "hours": ((exit_ - entry) / HOUR).round(1),
         "Z entry": t["z_entry"], "beta": t["beta"], "reason": t["reason"].fillna("open"),
-        "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": t["fees"], "funding": t["funding"],
+        "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": -t["fees"], "funding": -t["funding"],
     })
 
 

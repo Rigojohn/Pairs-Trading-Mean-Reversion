@@ -73,7 +73,7 @@ function cpLadder(sym, label, digits, book, bbo, mark, ownSide) {
       ss = String(Math.floor(left / 1000) % 60).padStart(2, "0");
     const r = 100 * mark.rate;
     const pays = ownSide && r !== 0 ? ownSide * r > 0 : null; // longs pay a positive rate, shorts receive it
-    const own = pays === null ? "" : ` · <span class="${pays ? "neg" : "pos"}">${pays ? "we pay" : "we receive"}</span>`;
+    const own = pays === null ? "" : ` · <span class="${pays ? "neg" : "pos"}">${pays ? "you pay" : "you receive"}</span>`;
     fund = `<div class="cp-fund"><span>mark <b>${cpPx(mark.mark, digits)}</b> · index ${cpPx(mark.index, digits)}</span>`
       + `<span>funding <b>${r >= 0 ? "+" : ""}${r.toFixed(4)}%</b> in ${hh}:${mm}:${ss}${own}</span></div>`;
   }

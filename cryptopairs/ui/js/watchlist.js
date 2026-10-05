@@ -31,9 +31,9 @@ function cpWlFlush(el) {
   if (cpWlDelivered(el) || el._tries >= 5 || Date.now() - el._since > 60000) { el._pending = null; return; }
   const running = !!document.querySelector('[data-testid="stStatusWidget"]');
   if (!running) el._idle = true;
-  // only the first load must not be interrupted; once the app has been idle, the 1-2 s live refresh
-  // keeps it "running" most of the time on a phone, and waiting for a gap would never send the click
-  if (running && !el._idle) return;
+  // only the first load must not be interrupted. The live refresh keeps the app "running" almost all
+  // the time, so once the list has been redrawn a few times (the app answers) the click goes out anyway
+  if (running && !el._idle && !(el._renders >= 3)) return;
   if (el._sent && Date.now() - el._sent < 4000) return;  // give the last one time to land
   el._tries += 1;
   el._sent = Date.now();
@@ -54,27 +54,44 @@ export default function (component) {
     el = document.createElement("div");
     el.className = "wl";
     parentElement.appendChild(el);
-    el.addEventListener("click", (ev) => {
-      const row = ev.target.closest(".wl-row");
-      if (!row) return;
+    // The rows are redrawn about once a second (live Z): a finger that touches a row and lifts 100 ms later
+    // would find it replaced and no click would fire. So the row is remembered on pointerdown and the tap
+    // is taken on pointerup, whatever the DOM looks like by then (a swipe, to scroll the list, is not a tap).
+    el.addEventListener("pointerdown", (ev) => {
+      const row = ev.target.closest && ev.target.closest(".wl-row");
+      el._down = row ? { id: row.dataset.id, x: ev.clientX, y: ev.clientY } : null;
+    });
+    // on the document: when the touched row was replaced, the pointerup no longer reaches the list
+    const up = (ev) => {
+      if (!el.isConnected) { document.removeEventListener("pointerup", up, true); return; }
+      const d = el._down;
+      el._down = null;
+      if (!d || Math.abs(ev.clientX - d.x) > 10 || Math.abs(ev.clientY - d.y) > 10) return;
       el.querySelectorAll(".wl-row.on").forEach((x) => x.classList.remove("on"));
-      row.classList.add("on");  // instant feedback; the page follows after the rerun
-      el._pending = row.dataset.id;
+      const row = [...el.querySelectorAll(".wl-row")].find((x) => x.dataset.id === d.id);
+      if (row) row.classList.add("on");  // instant feedback; the page follows after the rerun
+      el._pending = d.id;
       el._tries = 0;
       el._sent = 0;
       el._since = Date.now();
       cpWlFlush(el);
       cpWlCloseSidebar();
-    });
+    };
+    document.addEventListener("pointerup", up, true);
+    el.addEventListener("pointercancel", () => { el._down = null; });
     el._timer = setInterval(() => {
       if (!el.isConnected) { clearInterval(el._timer); return; }  // a rebuilt sidebar has its own list
       cpWlFlush(el);
     }, 400);
   }
   el._send = setTriggerValue;  // the latest render's callback
+  el._renders = (el._renders || 0) + 1;
   el._focus = data.focus;
   if (el._pending && cpWlDelivered(el)) el._pending = null;
   const shown = el._pending || data.focus;  // a click waiting to be sent keeps its highlight
+  const sig = JSON.stringify([data, shown]);
+  if (sig === el._sig) return;  // the framework redraws far more often than the data changes
+  el._sig = sig;
   const rows = data.rows || [];
   const open = rows.filter((r) => r.side), flat = rows.filter((r) => !r.side);
   const head = (t, n, right) => `<div class="wl-h"><span>${t} · ${n}</span><span>${right}</span></div>`;

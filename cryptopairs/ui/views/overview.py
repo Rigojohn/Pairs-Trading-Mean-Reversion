@@ -141,7 +141,9 @@ def live() -> None:
              f"best {num(ts['best'])} · worst {num(ts['worst'])}" if ts["n"] else None, **info)
 
     heading("Blotter · open positions (select a row for actions)")
-    blot = view[view["side"] != 0].copy()
+    # A fixed order: the table selects a row by position, and a list that re-sorts on every live price tick
+    # would hand the buttons below a different pair than the one that was tapped.
+    blot = view[view["side"] != 0].sort_values("pair").reset_index(drop=True)
     if blot.empty:
         st.caption("No open positions.")
     else:

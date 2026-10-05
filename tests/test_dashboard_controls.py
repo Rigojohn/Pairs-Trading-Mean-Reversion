@@ -232,7 +232,7 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
     assert not at.exception, at.exception
     labels = {m.label for m in at.metric}
     expected = {
-        "overview": {"NAV", "Today", "Since inception", "Sharpe 7d", "Max DD 7d", "Gross exposure", "BTC-equivalent",
+        "overview": {"NAV", "Today", "Since inception", "Sharpe All", "Max DD All", "Gross exposure", "BTC-equivalent",
                      "Funding carry", "Open positions", "Hit rate"},
         "pair": {"Position", "Unrealized", "Z now", "β in use"},
         "backtest": {"Sharpe · calibrated", "Total return · calibrated", "Trades · calibrated"},

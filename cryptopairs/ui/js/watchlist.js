@@ -29,7 +29,11 @@ function cpWlDelivered(el) {
 function cpWlFlush(el) {
   if (!el._pending) return;
   if (cpWlDelivered(el) || el._tries >= 5 || Date.now() - el._since > 60000) { el._pending = null; return; }
-  if (document.querySelector('[data-testid="stStatusWidget"]')) return;  // running: never interrupt it
+  const running = !!document.querySelector('[data-testid="stStatusWidget"]');
+  if (!running) el._idle = true;
+  // only the first load must not be interrupted; once the app has been idle, the 1-2 s live refresh
+  // keeps it "running" most of the time on a phone, and waiting for a gap would never send the click
+  if (running && !el._idle) return;
   if (el._sent && Date.now() - el._sent < 4000) return;  // give the last one time to land
   el._tries += 1;
   el._sent = Date.now();

@@ -79,7 +79,7 @@ def _pair_label(p: dict, overrides: dict) -> str:
 
 def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, default_db: str | None) -> Ctx | None:
     """The bot, a compact view menu and the live watchlist (a click picks the focus pair and opens its desk)."""
-    dbs = sorted(p.name for p in state_dir.glob("*.db"))
+    dbs = sorted((p.name for p in state_dir.glob("*.db")), key=lambda n: (n != "kalman_b.db", n))  # kalman first
     with st.sidebar:
         st.html('<div style="font-size:1.15rem;font-weight:700;letter-spacing:.02em">CryptoPairs '
                 '<span style="color:#f0b429">Desk</span></div>'
@@ -87,7 +87,7 @@ def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, d
         if not dbs:
             st.warning(f"No bot database in `{state_dir}/` yet. Start the bot first.")
             return None
-        idx = dbs.index(default_db) if default_db in dbs else (dbs.index("paper.db") if "paper.db" in dbs else 0)
+        idx = dbs.index(default_db) if default_db in dbs else 0
         # The chosen bot is also kept in a plain session key: a page switch (a watchlist click opens the
         # Pair desk) resets the widget itself, which sent the user back to the default bot.
         chosen = st.session_state.get("_bot")
@@ -112,12 +112,12 @@ def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, d
         with st.popover("View · pair · refresh", icon=":material/tune:", width="stretch"):
             focus = st.selectbox("Focus pair", [p["id"] for p in ordered], format_func=labels.get, key="focus",
                                  help="or click a pair in the watchlist")
-            window = st.segmented_control("History", list(WINDOWS), default="7d", key="window", required=True) or "7d"
-            refresh = st.segmented_control("Live update", REFRESH, default=2, key="refresh", required=True,
+            window = st.segmented_control("History", list(WINDOWS), default="All", key="window", required=True) or "All"
+            refresh = st.segmented_control("Live update", REFRESH, default=1, key="refresh", required=True,
                                            format_func=lambda x: "off" if x == 0 else f"{x}s",
                                            help="numbers and charts update in place; the bot writes live marks "
                                                 "every ~5 s")
-            refresh = 2 if refresh is None else refresh
+            refresh = 1 if refresh is None else refresh
             view_pairs = st.multiselect("Pairs in view", ids, default=[], format_func=labels.get, key="view_pairs",
                                         placeholder="all pairs", help="filter for the portfolio tables and charts")
         leverage = float((brief.get("config", {}).get("strategy") or {}).get("leverage") or 1.0)

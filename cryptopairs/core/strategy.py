@@ -157,14 +157,17 @@ class PairStrategy:
 
     # --------------------------------------------------------------- exit
     def check_exit(
-        self, ts: int, bar_index: int, equity: float, z_buy: float, z_sell: float
+        self, ts: int, bar_index: int, equity: float, z_buy: float, z_sell: float,
+        check_stop: bool = True,
     ) -> str | None:
+        """``check_stop=False``: only the exit signal (the Z crossing), for checks on live quotes
+        between bar closes; the stop-loss, z-stop and time stop stay on bar closes."""
         if self.side == FLAT:
             return None
-        if equity <= self.stop_level():
+        if check_stop and equity <= self.stop_level():
             return "stop_loss"
         off = self.cfg.z_stop_offset
-        if off is not None:
+        if check_stop and off is not None:
             z_stop = self.params.z_entry + off
             if (self.side == LONG and z_sell <= -z_stop) or (self.side == SHORT and z_buy >= z_stop):
                 return "stop_z"
@@ -179,6 +182,8 @@ class PairStrategy:
             self.prev_exit_z = z
         if hit:
             return "signal"
+        if not check_stop:
+            return None
         held = bar_index - self.entry_index
         mh = self.cfg.max_holding_bars
         if (mh is not None and held >= mh) or (self.hold_limit > 0 and held >= self.hold_limit):
@@ -188,9 +193,13 @@ class PairStrategy:
     # -------------------------------------------------------------- entry
     def check_entry(
         self, ts: int, bar_index: int, z_buy: float, z_sell: float,
-        funding_a: float = math.nan, funding_b: float = math.nan,
+        funding_a: float = math.nan, funding_b: float = math.nan, z_entry: float | None = None,
     ) -> int:
-        """``funding_a/b``: trailing average funding rate per hour of each leg (NaN = unknown)."""
+        """``funding_a/b``: trailing average funding rate per hour of each leg (NaN = unknown).
+
+        ``z_entry``: this bar's threshold when it is computed outside the pair's parameters
+        (``entry_rule: rolling_quantile``); None = the calibrated ``params.z_entry``.
+        """
         if (
             self.side != FLAT
             or self.deactivated
@@ -201,7 +210,10 @@ class PairStrategy:
         f = self.fit
         if not self.cfg.beta_min <= f.beta <= self.cfg.beta_max:
             return FLAT
-        z_entry = self.params.z_entry
+        if z_entry is None:
+            z_entry = self.params.z_entry
+        elif not math.isfinite(z_entry) or z_entry <= self.params.z_exit:
+            return FLAT  # no threshold yet (warm-up), or one that would sit inside the exit band
         if z_buy < -z_entry:
             side, z = LONG, z_buy
         elif z_sell > z_entry:

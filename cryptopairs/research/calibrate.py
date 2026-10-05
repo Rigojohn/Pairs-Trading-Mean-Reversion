@@ -143,10 +143,20 @@ def evaluate_portfolio(calibrations: list[Calibration], cfg: AppConfig) -> Portf
     store = DataStore(Path(cfg.data.dir), cfg.data.interval)
     runs: dict[str, BacktestResult] = {}
     rows = []
+    sc = cfg.strategy
     for c in chosen:
         params = params_from_row(c.best)
+        if rc.fixed_z_entry is not None or rc.fixed_z_exit is not None:  # one threshold set for all pairs
+            params = PairParams(params.lookback,
+                                params.z_entry if rc.fixed_z_entry is None else rc.fixed_z_entry,
+                                params.z_exit if rc.fixed_z_exit is None else rc.fixed_z_exit,
+                                params.kalman_delta)
         data = load_pair(store, c.a, c.b, rc.data_start_ms, rc.test_end_ms)
-        res = run_backtest(data, params, cfg.strategy, cfg.costs, rc.test_start_ms, rc.test_end_ms, capital)
+        fits = None
+        if rc.score_kalman_history is not None and params.kalman_delta is not None:
+            fits = estimate_fits(data.log_a, data.log_b, params.lookback, params.kalman_delta,
+                                 sc.kalman_outlier_z, sc.kalman_max_skips, history=rc.score_kalman_history)
+        res = run_backtest(data, params, sc, cfg.costs, rc.test_start_ms, rc.test_end_ms, capital, fits=fits)
         key = f"{c.a}-{c.b}"
         runs[key] = res
         m = res.metrics()

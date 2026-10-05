@@ -6,7 +6,7 @@
 // (another pair, timeframe or window) resets the visible range.
 // Series with a ``live`` binding are also updated from the Binance stream in the browser:
 //   z       mid executable Z from both legs' best bid/ask under the fit in use
-//   spread  log A - alpha - beta log B at the mids
+//   spread  log A - alpha - beta log B at the mids (x scale: 100 for %)
 //   kline   the forming candle; rebased: 100 x close / base; volume: the candle's quote volume
 
 const CP_SHADE = { autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 1 } }) };
@@ -56,6 +56,16 @@ function cpSeriesOptions(s) {
   const o = Object.assign({}, s.options || {});
   if (s.role === "shade") Object.assign(o, CP_SHADE, { priceScaleId: "shade", lastValueVisible: false, priceLineVisible: false });
   if (s.role === "guide") o.autoscaleInfoProvider = () => null; // drawn, but never stretches the price scale
+  if (s.include && s.include.length) { // levels drawn as price lines stay in view
+    const inc = s.include;
+    o.autoscaleInfoProvider = (orig) => {
+      const r = orig();
+      if (!r || !r.priceRange) return r;
+      r.priceRange.minValue = Math.min(r.priceRange.minValue, ...inc);
+      r.priceRange.maxValue = Math.max(r.priceRange.maxValue, ...inc);
+      return r;
+    };
+  }
   return o;
 }
 
@@ -72,7 +82,7 @@ function cpApplyLive(st, hub) {
     let point = null;
     if (L.kind === "z" || L.kind === "spread") {
       const z = hub.z(L.a, L.b, L.fit);
-      if (z) point = { time: cpBucket(z.ts, L.tf, L.label), value: L.kind === "z" ? z.z : z.u };
+      if (z) point = { time: cpBucket(z.ts, L.tf, L.label), value: L.kind === "z" ? z.z : z.u * (L.scale || 1) };
     } else {
       const k = ((hub.state.kline[L.symbol] || {})[L.interval]);
       if (!k) continue;
@@ -145,7 +155,7 @@ function cpRender(LWC, st, data) {
             lastTime: null, live: null };
       st.series.set(s.id, e);
     }
-    const oh = JSON.stringify([s.options || {}, s.margins || null]);
+    const oh = JSON.stringify([s.options || {}, s.margins || null, s.include || null]);
     if (oh !== e.ohash) {
       e.api.applyOptions(cpSeriesOptions(s));
       if (s.margins) e.api.priceScale().applyOptions({ scaleMargins: s.margins });

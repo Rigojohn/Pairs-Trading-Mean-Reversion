@@ -125,17 +125,20 @@ def _fit(n=48, t0=1_700_000_000_000):
 
 
 def test_z_spec_has_thresholds_trades_and_a_live_binding():
-    fit = _fit()
+    fit = _model()
+    now = int(fit["bar_ts"].iloc[-1]) + HOUR
     t_entry = int(fit["bar_ts"].iloc[10]) + 1800_000
     trades = pd.DataFrame([{"side": 1, "entry_ts": t_entry, "exit_ts": int(fit["bar_ts"].iloc[20]) + 600_000,
                             "reason": "signal", "pnl": 1.5, "entry_reason": "manual"}])
-    spec = TC.z_spec(fit, pd.DataFrame(), trades, "1h", z_entry=2.0, z_exit=0.5, exit_plan=None, what_if=(2.5, 0.5),
-                     max_entry_z=10.0, fit_in_use={"alpha": 0.1, "beta": 1.0, "sigma": 0.02},
-                     symbols=("AUSDT", "BUSDT"), now_ms=int(fit["bar_ts"].iloc[-1]))
+    no_px = TC.closes(None, None)  # Binance unreachable: the hourly view falls back to the bot's history
+    spec = TC.z_spec(no_px, fit, trades, "1h", z_entry=2.0, z_exit=0.5, exit_plan=None, what_if=(2.5, 0.5),
+                     max_entry_z=10.0, fit_now={"alpha": 0.1, "beta": 1.0, "sigma": 0.02},
+                     symbols=("AUSDT", "BUSDT"), now_ms=now)
     by = {s["id"]: s for s in spec["series"]}
+    assert not {"z_model", "z_live", "spread_live"} & set(by)  # one Z, one spread: no second or third line
     z = by["z"]
-    prices = sorted(l["price"] for l in z["lines"] if l["title"] in ("entry", "exit"))
-    assert prices == [-2.0, -0.5, 0.5, 2.0]
+    titled = {l["title"]: l["price"] for l in z["lines"] if l["title"].endswith(("entry", "exit"))}
+    assert titled == {"long entry": -2.0, "long exit": -0.5, "short entry": 2.0, "short exit": 0.5}  # flat: both ways
     assert {l["price"] for l in z["lines"] if l["title"] == "what-if"} == {2.5, -2.5}
     times = z["data"]["t"]
     assert times == sorted(set(times)) and times[0] == (fit["bar_ts"].iloc[0] + HOUR) // 1000
@@ -143,24 +146,171 @@ def test_z_spec_has_thresholds_trades_and_a_live_binding():
     assert [x["text"] for x in m] == ["M BUY", "CLOSE +1.50"]
     assert m[0]["time"] == (int(fit["bar_ts"].iloc[10]) + HOUR) // 1000  # the first close after the entry
     auto = trades.assign(entry_ts=int(fit["bar_ts"].iloc[10]), entry_reason="signal")  # decided at that bar's close
-    spec2 = TC.z_spec(fit, pd.DataFrame(), auto, "1h", z_entry=2.0, z_exit=0.5, now_ms=int(fit["bar_ts"].iloc[-1]))
+    spec2 = TC.z_spec(no_px, fit, auto, "1h", z_entry=2.0, z_exit=0.5, now_ms=now)
     m2 = {s["id"]: s for s in spec2["series"]}["z"]["markers"]
     assert m2[0]["text"] == "BUY" and m2[0]["time"] == m[0]["time"]
-    assert by["z_live"]["live"]["kind"] == "z" and by["z_live"]["live"]["label"] == "end"
+    assert z["live"]["kind"] == "z" and z["live"]["label"] == "end" and z["live"]["fit"]["sigma"] == 0.02
+    assert by["spread"]["live"]["kind"] == "spread" and by["spread"]["live"]["scale"] == 100.0
+    assert all("live" not in s for s in spec2["series"])  # no fit from the bot: nothing to follow live
     assert "shade0" in by and sum(v is not None for v in by["shade0"]["data"]["v"]) >= 10
     assert all(s["pane"] == 1 for k, s in by.items() if k.startswith(("band", "spread")))
-    again = TC.z_spec(fit, pd.DataFrame(), trades, "1h", z_entry=2.0, z_exit=0.5, now_ms=int(fit["bar_ts"].iloc[-1]))
+    u = np.asarray(by["spread"]["data"]["v"], dtype=float)  # spread in %, bands = z x sigma in %
+    assert np.allclose(u, np.asarray(z["data"]["v"], dtype=float) * 0.02 * 100)
+    assert by["band_short_entry"]["data"]["v"][0] == pytest.approx(2.0 * 2.0)
+    assert by["band_long_exit"]["data"]["v"][0] == pytest.approx(-0.5 * 2.0)
+    assert by["z"]["include"] == [-2.0, -0.5, 2.0, 0.5]  # the levels stay in view
+    # A long opened at Z -1.70 with exit 0: its entry and its exit, both kept on the scale.
+    lng = {s["id"]: s for s in TC.z_spec(no_px, fit, trades, "1h", z_entry=0.8, z_exit=0.0, now_ms=now, side=1,
+                                          entered=-1.70, fit_now={"alpha": 0.1, "beta": 1.0, "sigma": 0.02},
+                                          symbols=("AUSDT", "BUSDT"))["series"]}
+    assert {(l["title"], l["price"]) for l in lng["z"]["lines"] if l["title"]} == {("entry", -1.70), ("exit", 0.0)}
+    assert lng["z"]["include"] == [-1.70, 0.0] and not any(k.startswith("band") for k in lng)
+    assert {(l["title"], round(l["price"], 6)) for l in lng["spread"]["lines"] if l["title"]} == {
+        ("entry", round(-1.70 * 2.0, 6)), ("exit", 0.0)}  # Z x the frozen sigma, in %
+    again = TC.z_spec(no_px, fit, trades, "1h", z_entry=2.0, z_exit=0.5, now_ms=now,
+                      fit_now={"alpha": 0.1, "beta": 1.0, "sigma": 0.02})
     assert {s["id"]: s["hash"] for s in again["series"]}["z"] == z["hash"]  # same data, same hash
+    four = {s["id"]: s for s in TC.z_spec(no_px, fit, trades, "4h", z_entry=2.0, z_exit=0.5, now_ms=now)["series"]}
+    assert all(t % (4 * 3600) == 0 for t in four["z"]["data"]["t"]) and len(four["z"]["data"]["t"]) >= 11
 
 
-def test_intraday_z_buckets_the_live_marks():
-    ts = 1_699_999_980_000 + np.arange(0, 600_000, 5000)  # 10 whole minutes
-    live = pd.DataFrame({"ts": ts, "z_buy": np.linspace(-1, 1, ts.size) + 0.01, "z_sell": np.linspace(-1, 1, ts.size) - 0.01,
-                         "spread_u": 0.0, "sigma": 0.02, "beta": 1.0})
-    spec = TC.z_spec(pd.DataFrame(), live, pd.DataFrame(), "1m", z_entry=2.0, z_exit=0.0, now_ms=int(ts[-1]))
-    z = {s["id"]: s for s in spec["series"]}["z"]
-    assert len(z["data"]["t"]) == 10 and all(t % 60 == 0 for t in z["data"]["t"])
-    assert z["data"]["v"][-1] == pytest.approx(1.0)
+def test_a_position_exits_on_its_own_side_of_zero():
+    # In a position: where it was opened and its exit, on the side it came from.
+    assert TC.z_levels(-1, 2.0, 0.5, entered=2.4) == [(2.4, "entry", "entry"), (0.5, "exit", "exit")]
+    assert TC.z_levels(1, 0.8, 0.0, entered=-1.70) == [(-1.70, "entry", "entry"), (0.0, "exit", "exit")]
+    assert TC.z_levels(1, 2.0, 0.5) == [(-2.0, "entry", "entry"), (-0.5, "exit", "exit")]  # entry Z unknown
+    assert TC.z_levels(-1, 2.0, 0.5, exit_plan=1.0, entered=np.nan)[1] == (1.0, "exit", "exit · plan")
+    # Flat: the thresholds both ways.
+    assert TC.z_levels(0, 2.0, 0.0) == [(-2.0, "entry", "long entry"), (2.0, "entry", "short entry"),
+                                         (0.0, "exit", "exit")]
+    assert TC.z_levels(0, 2.0, 0.5)[1] == (-0.5, "exit", "long exit")
+    from cryptopairs.ui import desk as K
+    assert K.rule_text(-1, 2.0, 0.5) == "exit when Z falls to +0.5"
+    assert K.rule_text(1, 2.0, 0.0) == "exit when Z rises to 0"
+    assert K.rule_text(0, 2.5, 0.5) == "long < -2.5 · short > +2.5 · exits -0.5 / +0.5"
+
+
+def _model(n=48, t0=472_224 * HOUR, seed=3):
+    """Model history that agrees with its prices: z = (log_a - kf_alpha - kf_beta log_b) / kf_sigma."""
+    rng = np.random.default_rng(seed)
+    bar = t0 + np.arange(n) * HOUR
+    lb = np.log(5.0) + np.cumsum(rng.normal(0, 0.01, n))
+    al, be, si = 0.1 + np.linspace(0, 0.01, n), 1.0 + np.linspace(0, 0.05, n), np.full(n, 0.02)
+    la = al + be * lb + si * 3 * np.sin(np.arange(n) / 5)
+    return pd.DataFrame({"bar_ts": bar, "pair_id": "P", "kf_alpha": al, "kf_beta": be, "kf_sigma": si,
+                         "used_alpha": np.nan, "used_beta": np.nan, "used_sigma": np.nan,
+                         "spread_u": la - al - be * lb, "z": (la - al - be * lb) / si, "log_a": la, "log_b": lb})
+
+
+def _trade(fit, i, j, fit_abs=(0.5, 0.9, 0.03), side=1, exit_ms=None):
+    """A trade decided at the close of bar i (stamped with its open time) and closed at bar j's close."""
+    bar = fit["bar_ts"].to_numpy()
+    return {"side": side, "entry_ts": int(bar[i]), "exit_ts": exit_ms if exit_ms is not None else
+            (int(bar[j]) if j is not None else np.nan), "reason": "signal", "pnl": 1.0, "entry_reason": "signal",
+            "alpha": fit_abs[0], "beta": fit_abs[1], "sigma": fit_abs[2], "z_entry": -2.1}
+
+
+def test_fit_in_force_is_the_recorded_one_else_the_position_s_else_the_model_s():
+    fit = _model()
+    fit.loc[40, ["used_alpha", "used_beta", "used_sigma"]] = (0.3, 1.2, 0.05)  # recorded by the bot
+    bar = fit["bar_ts"].to_numpy()
+    stop_ms = int(bar[35]) + HOUR + 600_000  # an intrabar stop 10 minutes into the hour after bar 35's close
+    trades = pd.DataFrame([_trade(fit, 10, 20), _trade(fit, 30, None, (0.6, 0.8, 0.04), exit_ms=stop_ms)])
+    f = TC.fits_in_force(fit, trades, now_ms=int(bar[-1]) + HOUR)
+    assert (f["from_ms"].to_numpy() == bar + HOUR).all()
+    assert (f.loc[10:20, "beta"] == 0.9).all()  # frozen from the entry decision through the exit bar
+    assert f.loc[9, "beta"] == fit.loc[9, "kf_beta"] and f.loc[21, "beta"] == fit.loc[21, "kf_beta"]
+    assert (f.loc[30:35, "sigma"] == 0.04).all() and f.loc[36, "sigma"] == 0.02
+    assert tuple(f.loc[40, ["alpha", "beta", "sigma"]]) == (0.3, 1.2, 0.05)
+    assert np.allclose(f["model_z"], fit["z"])
+
+
+def test_the_same_moment_shows_the_same_z_on_every_timeframe():
+    fit = _model()
+    bar = fit["bar_ts"].to_numpy()
+    trades = pd.DataFrame([_trade(fit, 10, 20)])
+    now = int(bar[-1]) + HOUR
+    forces = TC.fits_in_force(fit, trades, now)
+    hourly = TC.z_points(TC.closes_from_fit(fit, "1h"), forces, "1h", now)
+    # The 1-minute bars that close on the hour share the hourly close; others in between.
+    rows = [(int(b) + HOUR - 60_000, np.exp(la), np.exp(lb)) for b, la, lb in zip(bar, fit["log_a"], fit["log_b"])]
+    rows += [(int(b) + 30 * 60_000, np.exp(la) * 1.001, np.exp(lb)) for b, la, lb in zip(bar, fit["log_a"], fit["log_b"])]
+    minute = TC.z_points(pd.DataFrame(rows, columns=["ts", "a", "b"]).sort_values("ts"), forces, "1m", now)
+    m = hourly.merge(minute, on="t", suffixes=("_h", "_m"))
+    assert len(m) == len(hourly) and np.allclose(m["z_h"], m["z_m"])
+    flat = ~hourly["t"].isin((bar[10:21] + HOUR) // 1000)
+    assert np.allclose(hourly.loc[flat, "z"], fit.loc[flat.to_numpy(), "z"])  # flat: refitted, the model's Z
+    k = 15  # in the position: the entry fit, not the model's
+    expect = (fit["log_a"][k] - 0.5 - 0.9 * fit["log_b"][k]) / 0.03
+    assert hourly.loc[k, "z"] == pytest.approx(expect)
+    # A bar closing between decisions uses the last decision's fit (bar 15's half-hour: the entry fit).
+    half = minute[minute["t"] == (int(bar[15]) + 31 * 60_000) // 1000].iloc[0]
+    assert half["z"] == pytest.approx((fit["log_a"][15] + np.log(1.001) - 0.5 - 0.9 * fit["log_b"][15]) / 0.03)
+
+
+def test_an_hourly_decision_is_marked_on_the_first_intraday_bar_after_the_close():
+    fit = _model()
+    bar = fit["bar_ts"].to_numpy()
+    trades = pd.DataFrame([_trade(fit, 10, 20)])
+    times = np.arange(int(bar[9]) + HOUR, int(bar[22]) + HOUR, 60_000) // 1000 + 60
+    m = TC.trade_markers(trades, times, 60, "end")
+    assert [x["time"] for x in m] == [(int(bar[10]) + HOUR) // 1000 + 60, (int(bar[20]) + HOUR) // 1000 + 60]
+    hourly = TC.trade_markers(trades, (bar + HOUR) // 1000, 3600, "end")
+    assert [x["time"] for x in hourly] == [(int(bar[10]) + HOUR) // 1000, (int(bar[20]) + HOUR) // 1000]
+
+
+def test_markers_sit_at_the_z_the_fills_got():
+    fit = _model()
+    bar = fit["bar_ts"].to_numpy()
+    a, b, sg = 0.5, 0.9, 0.03
+    z_in, z_out = 1.25, 0.31  # the fills, not the line at the bar's close
+    lb_in, lb_out = np.log(5.0), np.log(5.1)
+    t = {"side": -1, "entry_ts": int(bar[10]), "exit_ts": int(bar[20]), "reason": "signal", "pnl": 1.5,
+         "entry_reason": "signal", "alpha": a, "beta": b, "sigma": sg,
+         "entry_px_a": np.exp(a + b * lb_in + sg * z_in), "entry_px_b": np.exp(lb_in),
+         "exit_px_a": np.exp(a + b * lb_out + sg * z_out), "exit_px_b": np.exp(lb_out)}
+    times = (bar + HOUR) // 1000
+    sell, close = TC.trade_markers(pd.DataFrame([t]), times, 3600, "end", at_fill_z=True)
+    assert sell["position"] == "atPriceTop" and sell["price"] == pytest.approx(z_in) and sell["text"] == "SELL +1.25"
+    assert close["position"] == "atPriceMiddle" and close["price"] == pytest.approx(z_out)
+    assert close["text"] == "CLOSE +1.50 @ +0.31"
+    plain = TC.trade_markers(pd.DataFrame([t]), times, 3600, "end")  # candles: on the bar, as before
+    assert plain[0]["position"] == "aboveBar" and "price" not in plain[0]
+    no_px = TC.trade_markers(pd.DataFrame([{k: v for k, v in t.items() if "px" not in k}]), times, 3600, "end",
+                             at_fill_z=True)
+    assert no_px[0]["position"] == "aboveBar"  # older rows without fill prices
+
+
+def test_the_forming_bar_uses_the_bot_s_fit_now():
+    fit = _model()
+    bar = fit["bar_ts"].to_numpy()
+    now = int(bar[-1]) + HOUR + 20 * 60_000  # 20 minutes after the last decision
+    px = pd.DataFrame({"ts": [int(bar[-1]), int(bar[-1]) + HOUR], "a": [6.0, 6.1], "b": [5.0, 5.0]})
+    fit_now = {"alpha": 0.2, "beta": 1.1, "sigma": 0.025}
+    pts = TC.z_points(px, TC.fits_in_force(fit, None, now), "1h", now, fit_now)
+    assert pts["t"].iloc[-1] == (int(bar[-1]) + 2 * HOUR) // 1000  # labelled at its (future) close
+    assert pts["z"].iloc[-1] == pytest.approx((np.log(6.1) - 0.2 - 1.1 * np.log(5.0)) / 0.025)
+    assert pts["z"].iloc[0] == pytest.approx((np.log(6.0) - 0.2 - 1.1 * np.log(5.0)) / 0.025)  # closed at the decision
+    early = TC.z_points(px.assign(ts=px["ts"] - 400 * HOUR), TC.fits_in_force(fit, None, now), "1h", now)
+    assert early.empty  # before the first fit there is no Z
+
+
+def test_model_view_compares_the_estimate_with_the_fit_in_use():
+    fit = _model()
+    trades = pd.DataFrame([_trade(fit, 10, 20)])
+    spec = TC.model_spec(fit, trades, int(fit["bar_ts"].iloc[-1]) + HOUR, z_entry=2.0)
+    by = {s["id"]: s for s in spec["series"]}
+    zu, zm = (np.asarray(by[k]["data"]["v"], dtype=float) for k in ("z_used", "z_model"))
+    assert np.allclose(zu[:10], zm[:10]) and np.allclose(zu[21:], zm[21:])
+    assert not np.allclose(zu[10:21], zm[10:21]) and by["beta_used"]["data"]["v"][15] == 0.9
+    assert by["z_used"]["pane"] == by["z_model"]["pane"] == 2
+
+
+def test_relative_view_is_prices_only():
+    ts = 1_700_000_000_000 + np.arange(30) * 900_000
+    c = pd.DataFrame({"ts": ts, "o": 1.0, "h": 1.1, "l": 0.9, "c": np.linspace(1, 1.05, 30), "v": 10.0})
+    spec = TC.relative_spec(c, c, ("A", "B"), ("AUSDT", "BUSDT"), "15m", pd.DataFrame())
+    assert spec["panes"] == [1] and {s["id"] for s in spec["series"]} == {"rb_c_a", "rb_c_b"}
 
 
 def test_legs_spec_draws_candles_volume_and_entry_lines():

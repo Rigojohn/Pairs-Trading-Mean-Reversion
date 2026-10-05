@@ -33,7 +33,9 @@ function cpTicker(el, d, hub) {
   }
   let zs = `<div class="cp-tk"><span class="k">Z live</span><b>—</b></div>`;
   if (z) {
-    const ze = d.z_entry, hot = Math.abs(z.z) >= ze ? "hot" : Math.abs(z.z) >= ze - 0.25 ? "warm" : "";
+    // Flat: hot at an entry signal, warm near one. In a position the entry threshold means nothing.
+    const ze = d.z_entry, flat = !(P && P.side);
+    const hot = !flat ? "" : Math.abs(z.z) >= ze ? "hot" : Math.abs(z.z) >= ze - 0.25 ? "warm" : "";
     zs = `<div class="cp-tk"><span class="k">Z live</span><b class="cp-z ${hot}">${z.z >= 0 ? "+" : ""}${z.z.toFixed(2)}</b>`
        + `<span class="sub">buy ${z.zb.toFixed(2)} · sell ${z.zs.toFixed(2)}</span></div>`;
   }

@@ -16,7 +16,7 @@ import pandas as pd
 
 from cryptopairs.config import CostConfig, StrategyConfig
 from cryptopairs.core.book import PairBook
-from cryptopairs.core.signals import estimate_fits, ou_half_life
+from cryptopairs.core.signals import adaptive_entry_threshold, estimate_fits, ou_half_life
 from cryptopairs.core.sizing import SizingError, signed_quantities, target_quantities
 from cryptopairs.core.strategy import FLAT, STOP_REASONS, PairParams, PairStrategy
 from cryptopairs.research.data import PairData
@@ -96,6 +96,13 @@ def run_backtest(
         return BacktestResult(ts=np.empty(0, np.int64), equity=np.empty(0))
     alpha, beta, sigma = fits if fits is not None else estimate_fits(
         data.log_a, data.log_b, L, params.kalman_delta, cfg.kalman_outlier_z, cfg.kalman_max_skips)
+    # entry_rule rolling_quantile: this bar's threshold from the model's Z over the previous bars.
+    thr: list | None = None
+    if cfg.entry_rule == "rolling_quantile":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            z_path = (data.log_a - alpha - beta * data.log_b) / sigma
+        thr = adaptive_entry_threshold(z_path, cfg.adaptive_window, cfg.adaptive_quantile,
+                                       cfg.adaptive_min_z).tolist()
 
     fee = costs.taker_fee
     hs = costs.half_spread_bps * 1e-4
@@ -186,6 +193,8 @@ def run_backtest(
                 "equity_before": cash_before, "fees": fee_paid,
                 "funding_start": book.funding_paid,
             }
+            if thr is not None:  # the threshold the signal crossed (decided on the previous bar with next_open)
+                current["z_threshold"] = thr[i - 1 if next_open else i]
 
     def do_close(i: int, reason: str, pa: float, pb: float) -> None:
         nonlocal current
@@ -267,8 +276,9 @@ def run_backtest(
                 strat.set_fit(al[i], be[i], si[i], i)
             if strat.fit is not None:
                 zb, zs = strat.z_scores(la[i] + lbid, la[i] + lask, lb[i] + lbid, lb[i] + lask)
-                side = (strat.check_entry(ts, i, zb, zs, fra[i], frb[i]) if use_ff
-                        else strat.check_entry(ts, i, zb, zs))
+                ze = thr[i] if thr is not None else None
+                side = (strat.check_entry(ts, i, zb, zs, fra[i], frb[i], z_entry=ze) if use_ff
+                        else strat.check_entry(ts, i, zb, zs, z_entry=ze))
                 if side != FLAT and not (data_ends_early and i == i1):
                     if next_open:
                         if i < i1:

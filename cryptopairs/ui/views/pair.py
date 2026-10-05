@@ -14,6 +14,7 @@ import streamlit as st
 
 from cryptopairs.ui import data as D
 from cryptopairs.ui import desk as K
+from cryptopairs.ui import history as HI
 from cryptopairs.ui import lab as L
 from cryptopairs.ui import live as LIVE
 from cryptopairs.ui import market as M
@@ -28,9 +29,14 @@ pair = ctx.pair(pid)
 a, b = pair["a"].split("/")[0], pair["b"].split("/")[0]
 page_title(f"{a} / {b}", f"Pair desk · {pid} · pick another pair in the watchlist · times {D.TZ_LABEL}")
 
-VIEWS = {"Spread Z": ["1m", "5m", "15m", "1h"], "Legs": ["5m", "15m", "1h", "4h"],
+VIEWS = {"Spread Z": ["1m", "5m", "15m", "1h", "4h", "1d"], "Legs": ["5m", "15m", "1h", "4h"],
          "Relative": ["5m", "15m", "1h", "4h"], "Model": ["1h"]}
-CANDLES = {"5m": 576, "15m": 672, "1h": 720, "4h": 540}
+# Candles per timeframe (one request each): 1 day of 1m, 4 of 5m, 10 of 15m, ~6 weeks of 1h, 3 months of 4h,
+# 4 months of 1d. Spread Z reaches further back with the archive (ui/history.py).
+CANDLES = {"1m": 1440, "5m": 1152, "15m": 960, "1h": 1000, "4h": 540, "1d": 120}
+# Spread Z points sent per refresh (the chart reruns every few seconds): about what one screen holds
+# at 1h and 4h; 1d carries the whole history since 2023.
+HISTORY_BARS = {"1h": 1500, "4h": 1500, "1d": 2000}
 
 bar = st.container(horizontal=True, gap="large", vertical_alignment="bottom")
 view = bar.segmented_control("Chart", list(VIEWS), default="Spread Z", key="pd_view", required=True) or "Spread Z"
@@ -52,18 +58,29 @@ def _reductions(p: dict) -> list[int]:
 def _chart(s: K.PairState, p: dict, trades: pd.DataFrame) -> dict:
     use, wi = ctx.live_params(pid), ctx.what_if_for(pid)
     max_z = s.scfg.get("max_entry_z")
-    if view == "Spread Z":
-        return TC.z_spec(p["fit"], p["live_day"], trades, tf, z_entry=use.z_entry, z_exit=use.z_exit,
-                         exit_plan=s.strat.get("z_exit_override"), what_if=(wi.z_entry, wi.z_exit), max_entry_z=max_z,
-                         fit_in_use=s.fit, symbols=(s.id_a, s.id_b), now_ms=D.now_ms(), reductions=_reductions(p))
     if view == "Model":
-        return TC.model_spec(p["fit"], p["live"])
+        return TC.model_spec(p["fit"], trades, D.now_ms(), z_entry=use.z_entry)
     ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
+    if view == "Spread Z":
+        px, fit = TC.closes(ca, cb), p["fit"]
+        if tf not in TC.INTRADAY:  # the whole history: the archive (from 6/2023) before the bot's own records
+            fit = D.load_pair(str(ctx.db_path), D.version(ctx.db_path), pid, 0)["fit"]
+            hist = HI.model_history(str(ctx.data_dir), s.sym_a, s.sym_b, pid, int(use.lookback), use.kalman_delta,
+                                    s.scfg.get("kalman_history", 8760), s.scfg.get("kalman_outlier_z", 4.0),
+                                    int(s.scfg.get("kalman_max_skips", 48)))
+            fit, px = HI.extend(fit, px, hist, tf)
+            if px.empty:  # Binance did not answer: every close from the model rows
+                px = TC.closes_from_fit(fit, tf)
+            px = px.tail(HISTORY_BARS[tf])
+        return TC.z_spec(px, fit, trades, tf, z_entry=use.z_entry, z_exit=use.z_exit,
+                         exit_plan=s.strat.get("z_exit_override"), what_if=(wi.z_entry, wi.z_exit), max_entry_z=max_z,
+                         fit_now=s.fit, symbols=(s.id_a, s.id_b), now_ms=D.now_ms(), side=s.side,
+                         entered=s.row["Z at entry"], reductions=_reductions(p))
     if view == "Legs":
         entry = (float(s.book["entry_px_a"]), float(s.book["entry_px_b"])) if s.side else None
         return TC.legs_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), (s.digits_a, s.digits_b), tf, trades, entry,
                             side_a=s.side, reductions=_reductions(p))
-    return TC.relative_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), tf, s.fit, use.z_entry, use.z_exit, trades)
+    return TC.relative_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), tf, trades)
 
 
 @st.fragment(run_every=ctx.refresh or None)
@@ -85,7 +102,9 @@ def desk() -> None:
     g.metric("Unrealized", f"{r['unrealized']:+,.4f}", f"{r['unrealized %']:+.2f}%" if np.isfinite(r["unrealized %"]) else None,
              help="USDT, and % of the equity at entry (bot's 5-second marks)")
     g.metric("Z now", f"{r['Z now']:+.2f}" if np.isfinite(r["Z now"]) else "—",
-             f"entry ±{r['Z entry']:g} · exit ±{r['exit Z']:g}", **info, help="the bot's last live mark")
+             K.rule_text(s.side, r["Z entry"], r["exit Z"]), **info,
+             help="the bot's last live mark; entries are checked at each hourly close, exits too, or within "
+                  "seconds when the bot runs realtime exits (bot B)")
     if s.side:
         g.metric("To exit (Z)", f"{r['to exit']:+.2f}" if np.isfinite(r["to exit"]) else "—",
                  f"stop {r['to stop %']:.1f}% away" if np.isfinite(r["to stop %"]) else None, **info)
@@ -112,14 +131,25 @@ def desk() -> None:
             st.info("No data for this chart yet (Binance unreachable, or no model history before the bot's first bar).")
         TV.chart(spec, key="pd_chart", rev=f"{pid}-{view}-{tf}-{ctx.window}")
         st.caption({
-            "Spread Z": "Violet = the Z the strategy trades on (frozen fit while in a position), dotted = the model's Z; "
-                        "cyan = live Z from Binance in this browser. Red dashed = entry, green dotted = exit (amber = the "
-                        "position's exit plan or the what-if below). Shaded = in a position. Lower pane: the spread "
-                        "with its bands. 1–15 min views cover the bot's last 24 h of 5-second marks.",
+            "Spread Z": "One Z on every timeframe: the Z the strategy saw at that moment, i.e. Binance prices under "
+                        "the fit (α, β, σ) in force then (refitted every hour while flat, frozen at the entry while in "
+                        "a position). Each point is the Z at the bar's close, so 15:00 shows the same Z on 1m and 1h; "
+                        "the last point moves live with Binance and matches the ticker. Lines: while flat, the "
+                        "thresholds: LONG entry (green, below zero) and SHORT entry (red, above zero) with their exits "
+                        "(cyan). In a position only its own two: entry = the Z the fills got, which the PnL is measured "
+                        "from (a SHORT gains while Z is below it, a LONG while above), and its exit: a LONG exits when "
+                        "Z rises back to it, a SHORT when Z falls back to it. BUY/SELL/CLOSE sit at their fills' Z. The "
+                        "bot checks entries at each hourly close (the 1h points) and exits there too, or within seconds "
+                        "of the crossing when it runs realtime exits (bot B); between closes the stops act. 1h, 4h "
+                        "and 1d reach back to 2023: before the bot's own records the same model is run over the "
+                        "research archive (1d shows it all at once). Amber = the position's exit plan or the what-if below. Shaded = in a position. "
+                        "Lower pane: the spread, how far A is from its fair price against B in %, with the same levels "
+                        "(Z × σ). The model's own Z is in the Model view.",
             "Legs": "Candles from Binance; the forming candle updates live. Dashed lines = entry prices of the open position.",
-            "Relative": "Both legs rebased to 100 at the left edge. Lower pane: the Z these candles give under the fit "
-                        "in use today (for history, an approximation: the fit changes while the pair is flat).",
-            "Model": "Hedge ratio β and σ of the spread: the Kalman estimate each hour vs the fit the strategy used.",
+            "Relative": "Both legs rebased to 100 at the left edge; the forming candle updates live.",
+            "Model": "Each hour: the Kalman estimate (blue) vs the fit the strategy traded on (amber), for β, σ and "
+                     "the Z they give. They split only while a position keeps its entry fit: blue Z = the Z if the "
+                     "position were closed and the model refitted now.",
         }[view])
     with right:
         TV.market("book", key=f"pd_book_{pid}", **s.market_data())

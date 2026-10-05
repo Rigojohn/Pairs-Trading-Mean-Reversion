@@ -58,6 +58,8 @@ class PairRuntime:
     next_params: PairParams | None = None
     # True while an order for this pair is being worked (stops and new decisions skip it).
     busy: bool = False
+    # Open time of the bar in which a live (between-bars) exit happened: no re-entry on that bar.
+    exit_bar: int = -1
 
 
 @dataclass
@@ -126,6 +128,9 @@ class StrategyEngine:
         self._lock = asyncio.Lock()
         # Manual orders worked in the background (maker-first can take minutes).
         self._background: set[asyncio.Task] = set()
+        # Last Kalman run per pair: with the whole archive one run takes ~0.1 s, and the hourly
+        # decision and the dashboard's fit history filter the same series.
+        self._kalman_cache: dict[str, tuple[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
 
     # ------------------------------------------------------------ restore
     def _with_override(self, spec: PairSpec) -> PairSpec:
@@ -267,7 +272,7 @@ class StrategyEngine:
             # One action per pair per bar: an exit is never followed by a re-entry on the same bar.
             return Intent(pr, self._close_order(pr, reason, marks), bar_ts, bar_index, marks=marks)
 
-        if s.close_only:
+        if s.close_only or pr.exit_bar == bar_ts:  # one action per pair per bar, as in the backtest
             return None
         if strat.wants_refit(bar_index):
             strat.set_fit(*self._estimate(pr, window), bar_index)
@@ -292,20 +297,35 @@ class StrategyEngine:
         f, L = pr.strat.fit, pr.spec.params.lookback
         return ou_half_life(window[0][-L:] - f.alpha - f.beta * window[1][-L:])
 
+    def _kalman_bars(self) -> int:
+        """Bars the Kalman filter runs on: kalman_history, or all stored bars when it is None."""
+        n = self.cfg.strategy.kalman_history
+        return 10**9 if n is None else n
+
     def _window(self, pr: PairRuntime, bar_ts: int,
                 params: PairParams | None = None) -> tuple[np.ndarray, np.ndarray] | None:
         s, p = pr.spec, params or pr.spec.params
         if p.kalman_delta is not None:  # the filter needs a long history to converge; accept less once warm
             return self.feed.candles.aligned_logs(s.symbol_a, s.symbol_b, bar_ts,
-                                                  self.cfg.strategy.kalman_history, min_n=2 * p.lookback)
+                                                  self._kalman_bars(), min_n=2 * p.lookback)
         return self.feed.candles.aligned_logs(s.symbol_a, s.symbol_b, bar_ts, p.lookback)
+
+    def _kalman(self, pr: PairRuntime, la: np.ndarray, lb: np.ndarray,
+                p: PairParams) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        sc = self.cfg.strategy
+        key = (p.kalman_delta, p.lookback, la.shape[0], float(la[-1]), float(lb[-1]), float(la[0]), float(lb[0]))
+        hit = self._kalman_cache.get(pr.spec.id)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        fits = kalman_filter(la, lb, p.kalman_delta, p.lookback, sc.kalman_outlier_z, sc.kalman_max_skips)
+        self._kalman_cache[pr.spec.id] = (key, fits)
+        return fits
 
     def _estimate(self, pr: PairRuntime, window: tuple[np.ndarray, np.ndarray],
                   params: PairParams | None = None) -> tuple[float, float, float]:
-        p, sc = params or pr.spec.params, self.cfg.strategy
+        p = params or pr.spec.params
         if p.kalman_delta is not None:
-            al, be, si = kalman_filter(window[0], window[1], p.kalman_delta, p.lookback,
-                                       sc.kalman_outlier_z, sc.kalman_max_skips)
+            al, be, si = self._kalman(pr, window[0], window[1], p)
             return al[-1], be[-1], si[-1]
         return fit_ols(*window)
 
@@ -551,18 +571,17 @@ class StrategyEngine:
         it never changes a decision.
         """
         rows = []
-        sc = self.cfg.strategy
         for pr in self.pairs:
             s = pr.spec
             L = s.params.lookback
             kalman = s.params.kalman_delta is not None
-            n = sc.kalman_history if kalman else L + history_bars
+            n = self._kalman_bars() if kalman else L + history_bars
             w = self.feed.candles.aligned_window(s.symbol_a, s.symbol_b, bar_ts, n, min_n=L)
             if w is None:
                 continue
             ts, la, lb = w
             if kalman:
-                al, be, si = kalman_filter(la, lb, s.params.kalman_delta, L, sc.kalman_outlier_z, sc.kalman_max_skips)
+                al, be, si = self._kalman(pr, la, lb, s.params)
             else:
                 al, be, si = rolling_ols(la, lb, L)
             f = pr.strat.fit
@@ -830,6 +849,41 @@ class StrategyEngine:
         return rows
 
     # -------------------------------------------------------- continuous stop
+    async def check_exits_live(self) -> int:
+        """Exit signals on live quotes between bar closes (``runtime.realtime_exits``).
+
+        The same rule as at bar close (the Z at bid/ask under the position's frozen fit crosses
+        the exit band), checked every few seconds. Stops stay with the bar close and
+        ``check_stops``. The close is worked like a bar-close exit (maker first). Returns how
+        many exits were sent.
+        """
+        now = self.feed.now_ms()
+        bar_index = self.feed.last_closed_bar(now) // HOUR_MS
+        intents: list[Intent] = []
+        async with self._lock:
+            for pr in self.pairs:
+                if pr.strat.side == FLAT or pr.busy:
+                    continue
+                m = self._marks(pr)
+                if m is None or not m.quotes_ok:  # never act on a stale price
+                    continue
+                zb, zs = pr.strat.z_scores(m.log_bid_a, m.log_ask_a, m.log_bid_b, m.log_ask_b)
+                pr.last_z = (zb, zs)
+                eq = pr.book.equity(m.mid_a, m.mid_b)
+                reason = pr.strat.check_exit(now, bar_index, eq, zb, zs, check_stop=False)
+                if reason is None:
+                    continue
+                pr.busy = True
+                pr.exit_bar = now // HOUR_MS * HOUR_MS
+                z = zs if pr.strat.side == LONG else zb
+                self.store.event("realtime_exit", pr.spec.id, z=z, exit_z=pr.strat.exit_z())
+                log.info("%s: live Z %.2f crossed the exit band %.2f; exiting now", pr.spec.id, z,
+                         pr.strat.exit_z())
+                intents.append(Intent(pr, self._close_order(pr, reason, m), now, bar_index, marks=m))
+        for it in intents:
+            self._spawn(self._run(it))
+        return len(intents)
+
     async def check_stops(self) -> None:
         """Intrabar stops on live quotes: the full stop-loss if ``risk.continuous_stop``,
         otherwise only the catastrophe stop. The bar loop still runs the regular check."""

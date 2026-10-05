@@ -184,3 +184,29 @@ def test_performance_spec_has_nav_high_water_drawdown_and_trades():
     pts = pd.DataFrame({"ts": grid["t"], "nav": grid["nav"], "tol": F.LIVE_TOL})
     assert F.range_max_drawdown(pts, int(grid["t"].iloc[0]), int(grid["t"].iloc[-1]), 104.0) == pytest.approx(
         100 * (99 / 104 - 1))
+
+
+def test_capital_added_later_is_a_deposit_not_a_gain():
+    import json
+
+    from cryptopairs.ui import data as D
+
+    starts = pd.DataFrame({"ts": [1_000, 5_000, 9_000],
+                           "payload": [json.dumps({"pairs": ["P1", "P2"]}), json.dumps({"pairs": ["P1", "P2"]}),
+                                       json.dumps({"pairs": ["P1", "P2", "P3", "P4"]})]})
+    caps = pd.DataFrame({"pair_id": ["P1", "P2", "P3", "P4"], "capital": [100.0, 100.0, 100.0, 50.0]})
+    steps = D.capital_added(starts, caps)
+    assert steps.to_dict("list") == {"ts": [9_000, 9_000], "capital": [100.0, 50.0]}  # restarts add nothing
+    nav = pd.DataFrame({"ts": [2_000, 8_999, 9_000, 9_500], "equity": [200.0, 210.0, 360.0, 361.0]})
+    adj = D.with_capital(nav, nav["ts"], steps)
+    assert adj["equity"].tolist() == [350.0, 360.0, 360.0, 361.0]  # no jump at the deposit
+    assert D.with_capital(nav, nav["ts"], D.capital_added(starts.head(2), caps)).equals(nav)  # nothing added
+    # With sessions: the deposit lands when the adding session started (the event comes later), and
+    # the bar that session records on start-up (stamped earlier, with the new equity) is not counted twice.
+    sessions = pd.DataFrame({"id": ["s1", "s2", "s3"], "started_at": [900, 4_900, 8_700]})
+    steps = D.capital_added(starts.assign(session_id=["s1", "s2", "s3"]), caps, sessions)
+    assert steps["ts"].tolist() == [8_700, 8_700]
+    bars = pd.DataFrame({"bar_ts": [4_000, 7_000, 8_000], "session_id": ["s2", "s2", "s3"],
+                         "equity": [205.0, 209.0, 359.0]})  # the last one: start-up evaluation of s3
+    adj = D.with_capital(bars, bars["bar_ts"] + 1_000, steps, sessions)
+    assert adj["equity"].tolist() == [355.0, 359.0, 359.0]

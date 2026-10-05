@@ -207,3 +207,21 @@ sudo tailscale up --operator=$USER     # δίνει link: άνοιξέ το κα
 - Στον server (`ssh cryptobot`): `sudo tailscale serve status` πρέπει να δείχνει `https://cryptobot.tail5610d8.ts.net` → `http://127.0.0.1:8501`.
 - Εφεδρικά, ανοίγεις πάντα το dashboard με το SSH tunnel του βήματος 8.
 - Για να κλείσεις αυτή την πρόσβαση: `sudo tailscale serve reset` στον server.
+
+## 13. Δοκιμαστικό bot B (από 2026-10-05)
+
+Δίπλα στο κύριο bot (A) τρέχει ένα δεύτερο paper bot, το **B**, με τις διορθώσεις του audit:
+- το Kalman υπολογίζεται σε όλο το ιστορικό, όπως στο backtest·
+- φρέσκα ζεύγη·
+- όριο 15% του κεφαλαίου ανά νόμισμα.
+
+Έχει δική του βάση (`state/kalman_b.db`) και δικό του log (`logs/kalman_b.log`), οπότε το A δεν επηρεάζεται. Στο dashboard διαλέγεις από το sidebar `paper.db` (A) ή `kalman_b.db` (B).
+
+Το B χρειάζεται τον φάκελο `data/` στον server (βήμα 6), γιατί από εκεί ξεκινά το ιστορικό του Kalman.
+
+```bash
+docker compose logs -f bot_b          # τι κάνει το B
+docker compose stop bot_b             # σταματά μόνο το B (το A συνεχίζει)
+```
+
+Για να τελειώσει η δοκιμή: σβήνεις το service `bot_b` από το `docker-compose.yml` και τρέχεις `./deploy.sh`.

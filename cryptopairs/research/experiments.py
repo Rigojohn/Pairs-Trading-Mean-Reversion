@@ -51,6 +51,19 @@ VARIANTS: dict[str, dict] = {
     # Kalman-filter spread (dynamic alpha/beta/sigma); the delta grid replaces the lookback grid.
     "K1 Kalman filter": {"strategy": {"estimator": "kalman"}},
     "K2 Kalman + time stop": {"strategy": {"estimator": "kalman", **_V1}},
+    # K1 calibrated as usual, but scored with the Kalman refitted on the last year only: what
+    # the paper bot did before it loaded the whole archive (bot A). Shares K1's calibration.
+    "K1-1y bot refits on its last year": {"strategy": {"estimator": "kalman"},
+                                          "research": {"score_kalman_history": 8760}},
+    # No per-pair thresholds (their training Sharpe did not predict the test; audit 2026-10-05).
+    # Pairs and the Kalman delta come from K1's calibration; only the thresholds change.
+    # C1: one fixed band for every pair, set in advance (2 sigma in, exit at equilibrium).
+    "C1 common thresholds 2.0 / 0": {"strategy": {"estimator": "kalman"},
+                                     "research": {"fixed_z_entry": 2.0, "fixed_z_exit": 0.0}},
+    # W1: entry when |Z| beats its own 95th percentile of the last 30 days (at least 1.5); exit at 0.
+    "W1 adaptive: 95th pct of |Z| over 30d": {"strategy": {"estimator": "kalman", "entry_rule": "rolling_quantile"},
+                                              "research": {"fixed_z_exit": 0.0},
+                                              "calibrate_with": {"estimator": "kalman"}},
 }
 
 # Informational only (never used to choose): the 2025-10-10/11 liquidation cascade.
@@ -68,7 +81,8 @@ def _diagnostics(res) -> dict:
     return {
         "MedianHoldH": float(pd.Series(hours).median()) if hours else float("nan"),
         "SignalExit%": 100.0 * sum(t["reason"] == "signal" for t in closed) / len(closed) if closed else float("nan"),
-        "MeanAbsZEntry": float(pd.Series([abs(t["z_entry"]) for t in trades]).mean()) if trades else float("nan"),
+        "MedianAbsZEntry": float(pd.Series([abs(t["z_entry"]) for t in trades]).median()) if trades else float("nan"),
+        "Stops%": 100.0 * sum(str(t["reason"]).startswith("stop") for t in closed) / len(closed) if closed else float("nan"),
         "RetExCrash": float((1 + rets).prod() - 1),
     }
 
@@ -105,17 +119,20 @@ def run_experiments(base: AppConfig, out_dir: str | Path = "runs/experiments",
         for name, ov in VARIANTS.items():
             if only and not any(name.startswith(o) for o in only):
                 continue
-            vcfg = _apply(scfg, ov)
+            cal_rules = ov.get("calibrate_with")  # calibrate as these rules, score as the variant
+            vcfg = _apply(scfg, {k: v for k, v in ov.items() if k != "calibrate_with"})
+            ccfg = vcfg if cal_rules is None else _apply(scfg, {"strategy": cal_rules})
             rc = vcfg.research
             chosen = select_pairs(ranking, rc.top_n, rc.max_pairs_per_symbol)
             pairs = list(zip(chosen["a"], chosen["b"]))
             # Grid-search tables depend only on the trading rules, so variants that
-            # differ only in selection reuse them.
-            cache = grids.setdefault(json.dumps(ov.get("strategy", {}), sort_keys=True), {})
+            # differ only in selection or scoring reuse them.
+            rules = ov.get("strategy", {}) if cal_rules is None else cal_rules
+            cache = grids.setdefault(json.dumps(rules, sort_keys=True), {})
             need = [p for p in pairs if p not in cache]
             if need:
                 log.info("%s | %s: calibrating %d pairs", stage, name, len(need))
-                for c in calibrate_all(need, vcfg):
+                for c in calibrate_all(need, ccfg):
                     cache[(c.a, c.b)] = c.table
             cals = [Calibration(a, b, cache[(a, b)], select_best(cache[(a, b)], rc.selection, rc.min_train_trades))
                     for a, b in pairs if (a, b) in cache]
@@ -147,7 +164,8 @@ def summary(df: pd.DataFrame) -> str:
         lines.append(f"{v:40s} | {r[('Sharpe', 'validation')]:7.2f} {100 * r[('TotalRet', 'validation')]:+8.1f}% "
                      f"{100 * r[('MaxDD', 'validation')]:+8.1f}% | {r[('Sharpe', 'test')]:7.2f} "
                      f"{100 * r[('TotalRet', 'test')]:+8.1f}% {100 * r[('MaxDD', 'test')]:+8.1f}%{mark}")
-    diag = df.set_index(["variant", "stage"])[["Trades", "MedianHoldH", "SignalExit%", "MeanAbsZEntry", "RetExCrash"]]
-    lines += ["", "Diagnostics (trades, median hold in hours, % signal exits, mean |Z| at entry, "
+    cols = [c for c in ("Trades", "MedianHoldH", "SignalExit%", "Stops%", "MedianAbsZEntry", "RetExCrash") if c in df]
+    diag = df.set_index(["variant", "stage"])[cols]
+    lines += ["", "Diagnostics (trades, median hold in hours, % signal exits, % stop exits, median |Z| at entry, "
               "return excluding 2025-10-10/11 - informational only):", diag.round(2).to_string()]
     return "\n".join(lines)

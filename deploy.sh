@@ -11,7 +11,7 @@ DIR=/opt/cryptopairs
 cd "$(dirname "$0")"
 
 rsync -avR --delete --exclude __pycache__ \
-      cryptopairs config runs/kalman .streamlit \
+      cryptopairs config runs/kalman runs/kalman_b .streamlit \
       Dockerfile docker-compose.yml .dockerignore requirements-bot.txt requirements-dashboard.txt \
       "$HOST:$DIR/"
 

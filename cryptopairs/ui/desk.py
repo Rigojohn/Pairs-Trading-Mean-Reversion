@@ -28,6 +28,21 @@ from cryptopairs.ui.theme import AMBER, GREEN, MUTED, RED, pill
 SIDE_NAME = {1: "LONG", -1: "SHORT", 0: "FLAT"}
 
 
+def _z(x: float) -> str:
+    return "0" if x == 0 else f"{x:+g}"
+
+
+def rule_text(side: int, z_entry: float, z_exit: float) -> str:
+    """The levels in words. A long exits when Z rises back to -z_exit, a short when it falls back
+    to +z_exit: on its own side of zero, never across it (checked at each hourly close)."""
+    if side > 0:
+        return f"exit when Z rises to {_z(-z_exit)}"
+    if side < 0:
+        return f"exit when Z falls to {_z(z_exit)}"
+    exits = "exit 0" if z_exit == 0 else f"exits {_z(-z_exit)} / {_z(z_exit)}"
+    return f"long < {_z(-z_entry)} · short > {_z(z_entry)} · {exits}"
+
+
 @st.cache_resource(show_spinner=False)
 def app_config(path: str, profile: str | None) -> AppConfig:
     """The bot profile's full config (fees, execution mode) for previews."""
@@ -332,7 +347,7 @@ def _exit_tab(s: PairState, ctx) -> None:
     zo, so = s.strat.get("z_exit_override"), s.strat.get("stop_pct_override")
     cur_z = s.params["z_exit"] if zo is None else float(zo)
     cur_stop = stop_cfg if so is None else float(so)
-    st.caption(f"For this position only, until it closes. The pair's rule: exit at Z ±{s.params['z_exit']:g}, "
+    st.caption(f"For this position only, until it closes. The pair's rule: {rule_text(s.side, ze, s.params['z_exit'])}, "
                f"stop-loss {stop_cfg:.0%}. The catastrophe stop ({cat:.0%}) is a hard limit and stays."
                if cat else "For this position only, until it closes.")
     c1, c2 = st.columns(2)
@@ -399,7 +414,7 @@ def position_card(s: PairState) -> None:
     st.html(pill(SIDE_NAME[s.side] + " SPREAD", "ok" if s.side > 0 else "bad")
             + (pill("EXIT PLAN", "warn") if r["exit plan"] else "")
             + f'<span style="color:{MUTED};font-size:.84rem">since {D.clock(D.event_ms(s.strat["entry_ts"]), "%d/%m %H:%M")}'
-              f' · {held:.1f} h · Z at entry {r["Z at entry"]:+.2f} · exit at ±{r["exit Z"]:g}</span>')
+              f' · {held:.1f} h · Z at entry {r["Z at entry"]:+.2f} · {rule_text(s.side, 0.0, r["exit Z"])}</span>')
     st.html(_risk_bar(s))
     legs = []
     for label, qty, entry, mark in ((s.a, b["qty_a"], b["entry_px_a"], r["mark A"]), (s.b, b["qty_b"], b["entry_px_b"], r["mark B"])):

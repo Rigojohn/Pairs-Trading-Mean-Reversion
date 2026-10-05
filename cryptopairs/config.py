@@ -67,8 +67,12 @@ class StrategyConfig:
     kalman_outlier_z: float | None = 4.0
     kalman_max_skips: int = 48
     kalman_warmup: int = 720
-    # Bars of history the live bot feeds the Kalman filter (a year lets it converge).
-    kalman_history: int = 8760
+    # Bars of history the live bot feeds the Kalman filter. None = the whole local archive
+    # (data/klines/1h) plus REST bars since it ends: the same series the backtest and the
+    # calibration filter, so the bot trades the model that was tested. The filter does not
+    # forget its start as fast as 1/sqrt(delta) suggests, so a one-year window gives a
+    # different beta for some pairs (audit 2026-10-02).
+    kalman_history: int | None = 8760
     # Funding filter (not in the paper), based on each leg's trailing funding rate:
     #   "off"            ignore funding
     #   "short_positive" only enter if the coin we would short had positive funding
@@ -77,6 +81,14 @@ class StrategyConfig:
     funding_lookback_hours: int = 168
     funding_hold_hours: float = 120.0
     min_edge_cost_multiple: float | None = None
+    # Entry threshold. "fixed": the pair's calibrated z_entry (paper). "rolling_quantile": the
+    # adaptive_quantile of |Z| over the previous adaptive_window bars, at least adaptive_min_z:
+    # the band widens after a stretch of large swings and narrows when the spread is calm.
+    # Z is already scaled by sigma, so this adapts to the shape of recent swings, not their size.
+    entry_rule: str = "fixed"
+    adaptive_quantile: float = 0.95
+    adaptive_window: int = 720
+    adaptive_min_z: float = 1.5
 
     def validate(self) -> None:
         if self.leverage <= 0:
@@ -104,6 +116,12 @@ class StrategyConfig:
             raise ValueError(f"unknown funding_filter {self.funding_filter!r}")
         if not 0 < self.beta_min < self.beta_max:
             raise ValueError("strategy.beta_min must be > 0 and < beta_max")
+        if self.kalman_history is not None and self.kalman_history < 2 * self.kalman_warmup:
+            raise ValueError("strategy.kalman_history must be >= 2 * kalman_warmup (or null = whole archive)")
+        if self.entry_rule not in ("fixed", "rolling_quantile"):
+            raise ValueError(f"unknown entry_rule {self.entry_rule!r}")
+        if not 0.5 < self.adaptive_quantile < 1 or self.adaptive_window < 48 or self.adaptive_min_z <= 0:
+            raise ValueError("adaptive_quantile must be in (0.5, 1), adaptive_window >= 48, adaptive_min_z > 0")
 
 
 @dataclass
@@ -164,6 +182,14 @@ class ResearchConfig:
     selection: str = "argmax"
     # Cap how many selected pairs may share one coin (None = no cap, as in the paper).
     max_pairs_per_symbol: int | None = None
+    # Kalman history used when SCORING a portfolio (evaluate_portfolio). None = the whole series,
+    # as in the calibration. 8760 replays a bot that refits on its last year only (bot A before
+    # 2026-10-05); the calibration always uses the whole series, as the research did.
+    score_kalman_history: int | None = None
+    # Thresholds used when SCORING, the same for every pair (None = each pair's calibrated value).
+    # Removes the per-pair threshold search, whose training Sharpe did not predict the test.
+    fixed_z_entry: float | None = None
+    fixed_z_exit: float | None = None
     initial_capital: float = 1_000_000.0
     workers: int = 3
     runs_dir: str = "runs"
@@ -237,6 +263,12 @@ class RuntimeConfig:
     # Evaluate the last closed bar right after start-up (with live quotes) instead of
     # waiting up to an hour for the next bar close.
     evaluate_on_start: bool = True
+    # Exit the moment the live Z (bid/ask, the position's frozen fit) crosses the exit band,
+    # checked every exit_check_seconds, instead of waiting for the bar close. Entries, the
+    # stop-loss and the time stop stay on bar closes; no re-entry in the bar of such an exit.
+    # The backtest still exits on bar closes.
+    realtime_exits: bool = False
+    exit_check_seconds: float = 5.0
     # Live equity snapshot for the dashboard curve (between hourly bars).
     # Live snapshot (equity and every pair's spread, Z and PnL at live prices) for the dashboard.
     live_snapshot_seconds: float = 5.0

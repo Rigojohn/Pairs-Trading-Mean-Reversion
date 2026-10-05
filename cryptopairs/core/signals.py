@@ -180,17 +180,71 @@ def kalman_filter(
     return alpha, beta, sigma
 
 
+def kalman_filter_windowed(
+    log_a: np.ndarray,
+    log_b: np.ndarray,
+    delta: float,
+    warmup: int = 720,
+    outlier_z: float | None = 4.0,
+    max_skips: int = 48,
+    window: int = 8760,
+    step: int = 168,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The Kalman filter as a bot sees it when it refits on its last ``window`` bars only.
+
+    Such a bot restarts the filter every hour from ``window`` bars back. Replaying that
+    exactly costs one full filter run per bar, so the restart is moved once per ``step``
+    bars: the bars of each block [s, s + step) come from one run over [s - window + 1,
+    s + step). Each output is still a prior (it never sees its own bar). While less than
+    ``window`` bars of history exist the result equals ``kalman_filter`` on the whole series.
+    """
+    y = np.asarray(log_a, dtype=np.float64)
+    x = np.asarray(log_b, dtype=np.float64)
+    n = y.shape[0]
+    if window >= n:
+        return kalman_filter(y, x, delta, warmup, outlier_z, max_skips)
+    alpha = np.full(n, np.nan)
+    beta = np.full(n, np.nan)
+    sigma = np.full(n, np.nan)
+    head = kalman_filter(y[:window], x[:window], delta, warmup, outlier_z, max_skips)
+    for out, part in zip((alpha, beta, sigma), head):
+        out[:window] = part
+    for s in range(window, n, step):
+        e = min(n, s + step)
+        lo = s - window + 1
+        al, be, si = kalman_filter(y[lo:e], x[lo:e], delta, warmup, outlier_z, max_skips)
+        k = s - lo
+        alpha[s:e], beta[s:e], sigma[s:e] = al[k:], be[k:], si[k:]
+    return alpha, beta, sigma
+
+
 def estimate_fits(
     log_a: np.ndarray, log_b: np.ndarray, lookback: int, kalman_delta: float | None = None,
-    outlier_z: float | None = 4.0, max_skips: int = 48,
+    outlier_z: float | None = 4.0, max_skips: int = 48, history: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-bar (alpha, beta, sigma): rolling OLS (paper), or Kalman when ``kalman_delta`` is set.
 
-    For Kalman pairs ``lookback`` is the warm-up and sigma window.
+    For Kalman pairs ``lookback`` is the warm-up and sigma window. ``history`` replays a bot
+    that filters only its last ``history`` bars (None = the whole series).
     """
     if kalman_delta is None:
         return rolling_ols(log_a, log_b, lookback)
+    if history is not None:
+        return kalman_filter_windowed(log_a, log_b, kalman_delta, lookback, outlier_z, max_skips, history)
     return kalman_filter(log_a, log_b, kalman_delta, lookback, outlier_z, max_skips)
+
+
+def adaptive_entry_threshold(z: np.ndarray, window: int, quantile: float, min_z: float) -> np.ndarray:
+    """Per-bar entry threshold: the ``quantile`` of |Z| over the previous ``window`` bars.
+
+    Element t uses bars [t - window, t - 1] only, so the threshold for bar t is known before
+    bar t. At least ``min_z``; NaN until half a window of finite Z values exists.
+    """
+    import pandas as pd
+
+    a = pd.Series(np.abs(np.asarray(z, dtype=np.float64)))
+    q = a.rolling(window, min_periods=window // 2).quantile(quantile).shift(1).to_numpy()
+    return np.where(np.isfinite(q), np.maximum(q, min_z), np.nan)
 
 
 def zscore(log_a: float, log_b: float, alpha: float, beta: float, sigma: float) -> float:

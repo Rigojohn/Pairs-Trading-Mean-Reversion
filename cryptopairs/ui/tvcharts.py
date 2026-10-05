@@ -4,10 +4,10 @@ Pure functions: database frames in, a JSON-ready dict out (panes, series with da
 price lines, markers, live bindings to the browser's Binance stream). Kept free of Streamlit
 so the tests can check them.
 
-Lightweight Charts spaces bars evenly by index, so each chart uses one resolution only:
-hourly model history, or the bot's 5-second marks bucketed to 1/5/15 minutes, or exchange
-candles. Times are UTC seconds (the browser shows them in the dashboard's zone, ui/tv.py);
-hourly model points are labelled at the bar's close.
+Lightweight Charts spaces bars evenly by index, so each chart uses one resolution only.
+Times are UTC seconds (the browser shows them in the dashboard's zone, ui/tv.py). Candles are
+labelled at their open, as on an exchange; a Z point is labelled at the close it was measured
+at, so the same moment shows the same Z on every timeframe.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from cryptopairs.ui.theme import AMBER, BORDER, CYAN, FAINT, GREEN, LEG_A, LEG_B
 
 HOUR = 3_600_000
 SOLID, DOTTED, DASHED, LARGE_DASHED, SPARSE = 0, 1, 2, 3, 4
-TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
-# Bars shown when a chart opens (the rest is a scroll away).
-VISIBLE = {"1m": 360, "5m": 288, "15m": 192, "1h": 24 * 14, "4h": 180}
+TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+# Bars shown when a chart opens (the rest is a scroll away). 1d: the whole history at once.
+VISIBLE = {"1m": 360, "5m": 288, "15m": 192, "1h": 24 * 14, "4h": 180, "1d": 1300}
 INTRADAY = ("1m", "5m", "15m")
 
 
@@ -54,9 +54,13 @@ def _dedupe(t: np.ndarray, *cols: np.ndarray) -> tuple:
 
 def series(sid: str, kind: str, data: dict, pane: int = 0, options: dict | None = None, lines: list | None = None,
            markers: list | None = None, live: dict | None = None, legend: str | None = None, digits: int = 2,
-           role: str | None = None, margins: tuple[float, float] | None = None) -> dict:
-    """One series. ``margins``: (top, bottom) share of the pane its price scale leaves empty."""
+           role: str | None = None, margins: tuple[float, float] | None = None,
+           include: list[float] | None = None) -> dict:
+    """One series. ``margins``: (top, bottom) share of the pane its price scale leaves empty;
+    ``include``: values its price scale always shows (levels drawn as price lines)."""
     s = {"id": sid, "type": kind, "pane": pane, "data": data, "options": options or {}, "digits": digits}
+    if include:
+        s["include"] = [float(x) for x in include]
     if margins:
         s["margins"] = {"top": margins[0], "bottom": margins[1]}
     if lines:
@@ -107,11 +111,24 @@ def _label(ms: int, tf_sec: int, label: str) -> int:
     return int(math.ceil(sec / tf_sec) * tf_sec) if label == "end" else int(sec // tf_sec * tf_sec)
 
 
+def fill_z(t, px_a, px_b) -> float | None:
+    """The Z of fills at ``px_a``/``px_b`` under the trade's fit (frozen for its whole life)."""
+    try:
+        a, b, s, pa, pb = (float(x) for x in (t.alpha, t.beta, t.sigma, px_a, px_b))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not (s > 0 and pa > 0 and pb > 0 and math.isfinite(a) and math.isfinite(b)):
+        return None
+    return (math.log(pa) - a - b * math.log(pb)) / s
+
+
 def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: str = "start",
-                  reductions: list[int] | None = None) -> list[dict]:
+                  reductions: list[int] | None = None, at_fill_z: bool = False) -> list[dict]:
     """Entry / close / stop markers of the bot's trades, placed on the bar where each happened.
 
-    ``label``: "end" when a bar's time is its close (hourly model points), else its open.
+    ``label``: "end" when a bar's time is its close (Z points), else its open. ``at_fill_z``
+    (Z charts): each marker sits at the Z its fills got, which is what the PnL is measured from,
+    rather than on the line at the bar's close (the order may fill seconds or minutes later).
     """
     times = np.asarray(times, dtype=np.int64)
     if times.size == 0:
@@ -119,7 +136,10 @@ def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: s
     lo, hi = int(times[0]) - tf_sec, int(times[-1]) + tf_sec
 
     def bar(ms: int) -> int | None:
-        b = _label(event_ms(ms), tf_sec, label)
+        real = event_ms(ms)
+        if label == "end" and tf_sec * 1000 < HOUR and int(ms) % HOUR == 0:
+            real += 1  # an hourly decision runs seconds after the close: the next intraday bar
+        b = _label(real, tf_sec, label)
         return _snap(times, b) if lo <= b <= hi else None
 
     out = []
@@ -128,18 +148,26 @@ def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: s
         manual = getattr(t, "entry_reason", None) == "manual"
         tm = bar(t.entry_ts)
         if tm is not None:
-            out.append({"time": tm, "position": "belowBar" if side > 0 else "aboveBar",
-                        "shape": "arrowUp" if side > 0 else "arrowDown", "color": GREEN if side > 0 else RED,
-                        "text": ("M " if manual else "") + ("BUY" if side > 0 else "SELL")})
+            m = {"time": tm, "position": "belowBar" if side > 0 else "aboveBar",
+                 "shape": "arrowUp" if side > 0 else "arrowDown", "color": GREEN if side > 0 else RED,
+                 "text": ("M " if manual else "") + ("BUY" if side > 0 else "SELL")}
+            z = fill_z(t, getattr(t, "entry_px_a", None), getattr(t, "entry_px_b", None)) if at_fill_z else None
+            if z is not None:
+                m.update(position="atPriceBottom" if side > 0 else "atPriceTop", price=z, text=f"{m['text']} {z:+.2f}")
+            out.append(m)
         if pd.notna(t.exit_ts):
             tm = bar(int(t.exit_ts))
             if tm is not None:
                 reason = str(t.reason or "")
                 stop = reason.startswith(("stop", "liquidation"))
                 pnl = float(t.pnl) if pd.notna(t.pnl) else math.nan
-                out.append({"time": tm, "position": "aboveBar" if side > 0 else "belowBar",
-                            "shape": "square" if stop else "circle", "color": AMBER if stop else TEXT,
-                            "text": ("STOP" if stop else "CLOSE") + (f" {pnl:+.2f}" if math.isfinite(pnl) else "")})
+                m = {"time": tm, "position": "aboveBar" if side > 0 else "belowBar",
+                     "shape": "square" if stop else "circle", "color": AMBER if stop else TEXT,
+                     "text": ("STOP" if stop else "CLOSE") + (f" {pnl:+.2f}" if math.isfinite(pnl) else "")}
+                z = fill_z(t, getattr(t, "exit_px_a", None), getattr(t, "exit_px_b", None)) if at_fill_z else None
+                if z is not None:
+                    m.update(position="atPriceMiddle", price=z, text=f"{m['text']} @ {z:+.2f}")
+                out.append(m)
     for ms in reductions or []:
         tm = bar(ms + 1 if int(ms) % HOUR == 0 else ms)  # always a real time
         if tm is not None:
@@ -182,98 +210,183 @@ def shade(times: np.ndarray, spans: list[tuple[int, int, int]], tf_sec: int, lab
 
 
 # ------------------------------------------------------------- spread Z
-def _intraday(live: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """The bot's live marks bucketed to ``tf`` (last mark of each bucket, labelled at its start)."""
-    step = TF_SECONDS[tf] * 1000
-    if live is None or live.empty:
-        return pd.DataFrame(columns=["t", "z", "u", "sigma", "beta"])
-    df = live.assign(b=(live["ts"] // step) * step).sort_values("ts").groupby("b").last()
-    return pd.DataFrame({"t": (df.index.to_numpy() // 1000).astype(np.int64),
-                         "z": ((df["z_buy"] + df["z_sell"]) / 2).to_numpy(dtype=float),
-                         "u": df["spread_u"].to_numpy(dtype=float), "sigma": df["sigma"].to_numpy(dtype=float),
-                         "beta": df["beta"].to_numpy(dtype=float)})
+def fits_in_force(fit: pd.DataFrame, trades: pd.DataFrame | None, now_ms: int) -> pd.DataFrame:
+    """The fit (alpha, beta, sigma) the strategy traded on from each hourly decision on.
 
-
-def _hourly(fit: pd.DataFrame) -> pd.DataFrame:
-    """Hourly model history: the strategy's Z (fit in use when recorded, else the model's) and the model's."""
+    Model-history row ``bar_ts`` is decided at that bar's close (``from_ms`` = bar_ts + 1 h)
+    and holds until the next decision. Its fit is the one the bot recorded as in use; where
+    none was recorded (history back-filled on a restart, hours the bot was down) it is the fit
+    frozen at the entry of a position held then, else the model's estimate at that bar, which
+    is what a flat strategy refits to every bar. ``model_z``: the Z under the model's estimate.
+    """
+    cols = ["from_ms", "alpha", "beta", "sigma", "model_z"]
     if fit is None or fit.empty:
-        return pd.DataFrame(columns=["t", "z", "z_model", "u", "sigma"])
-    used = fit["used_sigma"].notna() & (fit["used_sigma"] > 0)
-    u_used = fit["log_a"] - fit["used_alpha"] - fit["used_beta"] * fit["log_b"]
-    u = np.where(used, u_used, fit["spread_u"])
-    sigma = np.where(used, fit["used_sigma"], fit["kf_sigma"])
+        return pd.DataFrame(columns=cols)
+    f = fit.sort_values("bar_ts")
+    start = f["bar_ts"].to_numpy(dtype=np.int64) + HOUR
+    al, be, si = (f[f"kf_{k}"].to_numpy(dtype=float).copy() for k in ("alpha", "beta", "sigma"))
+    held = trades.sort_values("entry_ts") if trades is not None and len(trades) and "sigma" in trades else ()
+    for t in (held.itertuples() if len(held) else ()):
+        if not (pd.notna(t.alpha) and pd.notna(t.beta) and pd.notna(t.sigma) and t.sigma > 0):
+            continue
+        a = event_ms(t.entry_ts)
+        b = event_ms(t.exit_ts) if pd.notna(t.exit_ts) else now_ms
+        m = (start + HOUR > a) & (start <= b)  # still frozen after an exit, until the next bar refits
+        al[m], be[m], si[m] = float(t.alpha), float(t.beta), float(t.sigma)
+    used = (f["used_sigma"] > 0).to_numpy()
+    al[used], be[used], si[used] = (f[f"used_{k}"].to_numpy(dtype=float)[used] for k in ("alpha", "beta", "sigma"))
+    return pd.DataFrame({"from_ms": start, "alpha": al, "beta": be, "sigma": si,
+                         "model_z": f["z"].to_numpy(dtype=float)})
+
+
+def closes(ca: pd.DataFrame | None, cb: pd.DataFrame | None) -> pd.DataFrame:
+    """Close prices of both legs on the bars they share (``ts`` = open time, ms)."""
+    if ca is None or cb is None or ca.empty or cb.empty:
+        return pd.DataFrame(columns=["ts", "a", "b"])
+    return ca[["ts", "c"]].merge(cb[["ts", "c"]], on="ts", suffixes=("_a", "_b")).rename(
+        columns={"c_a": "a", "c_b": "b"}).sort_values("ts", ignore_index=True)
+
+
+def closes_from_fit(fit: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Hourly or 4-hour closes from the bot's model history (when Binance does not answer)."""
+    step = TF_SECONDS[tf] * 1000
+    if fit is None or fit.empty or step < HOUR:
+        return pd.DataFrame(columns=["ts", "a", "b"])
+    f = fit[(fit["bar_ts"] + HOUR) % step == 0]
+    return pd.DataFrame({"ts": (f["bar_ts"] + HOUR - step).to_numpy(dtype=np.int64),
+                         "a": np.exp(f["log_a"].to_numpy(dtype=float)), "b": np.exp(f["log_b"].to_numpy(dtype=float))})
+
+
+def z_points(px: pd.DataFrame, forces: pd.DataFrame, tf: str, now_ms: int, fit_now: dict | None = None) -> pd.DataFrame:
+    """Z and the spread at each bar's close, under the fit in force at that moment.
+
+    One definition for every timeframe: a 1-minute bar closing on the hour shows the same Z as
+    the hourly bar closing then. Points are labelled at the close (``t``, seconds); the forming
+    bar's close is now, and from the last decision on the fit is ``fit_now`` (the bot's).
+    """
+    out = pd.DataFrame(columns=["t", "z", "u", "sigma"])
+    if px is None or px.empty or forces is None or forces.empty:
+        return out
+    step = TF_SECONDS[tf] * 1000
+    ts = px["ts"].to_numpy(dtype=np.int64)
+    moment = np.minimum(ts + step, now_ms)
+    start = forces["from_ms"].to_numpy(dtype=np.int64)
+    i = np.searchsorted(start, moment, side="right") - 1
+    known = i >= 0
+    pick = lambda k: np.where(known, forces[k].to_numpy(dtype=float)[np.clip(i, 0, None)], np.nan)  # noqa: E731
+    al, be, si = pick("alpha"), pick("beta"), pick("sigma")
+    if fit_now and fit_now.get("sigma"):
+        cur = moment >= start[-1]
+        al[cur], be[cur], si[cur] = float(fit_now["alpha"]), float(fit_now["beta"]), float(fit_now["sigma"])
     with np.errstate(invalid="ignore", divide="ignore"):
-        z = np.where(used, u_used / fit["used_sigma"], fit["z"])
-    return pd.DataFrame({"t": ((fit["bar_ts"] + HOUR) // 1000).astype(np.int64), "z": z,
-                         "z_model": fit["z"].to_numpy(dtype=float), "u": u, "sigma": sigma})
+        u = np.log(px["a"].to_numpy(dtype=float)) - al - be * np.log(px["b"].to_numpy(dtype=float))
+        z = np.where(si > 0, u / si, np.nan)
+    ok = np.flatnonzero(np.isfinite(z))
+    if ok.size == 0:
+        return out
+    k = slice(ok[0], None)  # nothing before the first fit
+    return pd.DataFrame({"t": ((ts + step) // 1000)[k], "z": z[k], "u": u[k], "sigma": si[k]})
 
 
-def z_spec(fit: pd.DataFrame, live: pd.DataFrame, trades: pd.DataFrame, tf: str, *, z_entry: float, z_exit: float,
+def z_levels(side: int, z_entry: float, z_exit: float, exit_plan: float | None = None,
+             entered: float | None = None) -> list[tuple[float, str, str]]:
+    """The Z levels that matter now, as (Z, "entry" | "exit", label).
+
+    Flat: the thresholds, a long entry below -z_entry and a short entry above +z_entry, with their
+    exits. In a position only its own two: where it entered (``entered``, the Z its fills got;
+    the threshold when unknown) and its exit. A long exits when Z rises back to -z_exit, a short when
+    it falls back to +z_exit: on the side it came from, never across zero. ``exit_plan`` replaces
+    z_exit in a position.
+    """
+    if side:
+        zx = z_exit if exit_plan is None else exit_plan
+        z_in = -side * z_entry if entered is None or not math.isfinite(entered) else float(entered)
+        return [(z_in, "entry", "entry"), (-side * zx, "exit", "exit · plan" if exit_plan is not None else "exit")]
+    out = []
+    for sd, name in ((1, "long"), (-1, "short")):
+        out.append((-sd * z_entry, "entry", f"{name} entry"))
+        if z_exit > 0:
+            out.append((-sd * z_exit, "exit", f"{name} exit"))
+    if z_exit <= 0:
+        out.append((0.0, "exit", "exit"))
+    return out
+
+
+def _level_style(z: float, role: str, label: str, side: int = 0) -> tuple[str, int]:
+    """Colour and line style of a level: long green, short red, exits cyan, a manual plan amber."""
+    if label.endswith("plan"):
+        return AMBER, DOTTED
+    if role == "exit":
+        return CYAN, DOTTED
+    long = side > 0 if side else z < 0
+    return (GREEN if long else RED), DASHED
+
+
+def z_spec(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, *, z_entry: float, z_exit: float,
            exit_plan: float | None = None, what_if: tuple[float, float] | None = None, max_entry_z: float | None = None,
-           fit_in_use: dict | None = None, symbols: tuple[str, str] | None = None, now_ms: int,
-           reductions: list[int] | None = None, height: int = 520) -> dict:
-    """Spread Z with the thresholds, trades and the position shaded; the spread and its bands below."""
+           fit_now: dict | None = None, symbols: tuple[str, str] | None = None, now_ms: int, side: int = 0,
+           entered: float | None = None, reductions: list[int] | None = None, height: int = 560) -> dict:
+    """The strategy's Z at every moment, with the levels it acts on (``z_levels``: both directions
+    while flat, the open position's own while ``side`` != 0), the trades and the position shaded;
+    the spread (% from fair value) with the same levels as bands below. ``px``: ``closes(...)`` at ``tf``
+    (hourly and 4-hour fall back to the bot's model history). The last point follows Binance live."""
     tf_sec = TF_SECONDS[tf]
-    if tf in INTRADAY:
-        h, label = _intraday(live, tf), "start"
-    else:
-        h, label = _hourly(fit), "end"
+    if (px is None or px.empty) and tf not in INTRADAY:
+        px = closes_from_fit(fit, tf)
+    h = z_points(px, fits_in_force(fit, trades, now_ms), tf, now_ms, fit_now)
     t = h["t"].to_numpy(dtype=np.int64)
     out: list[dict] = []
-    sp = shade(t, position_spans(trades, now_ms), tf_sec, label)
+    sp = shade(t, position_spans(trades, now_ms), tf_sec, "end")
     if sp:
         out.append(sp)
-    lines = [price_line(z_entry, RED, "entry"), price_line(-z_entry, RED, "entry")]
-    zx = z_exit if exit_plan is None else exit_plan
-    ex_color, ex_title = (GREEN, "exit") if exit_plan is None else (AMBER, "exit · plan")
-    if zx > 0:
-        lines += [price_line(zx, ex_color, ex_title, DOTTED), price_line(-zx, ex_color, ex_title, DOTTED)]
-    lines.append(price_line(0.0, BORDER, "", SOLID, 1, axis=False))
-    if max_entry_z:
-        lines += [price_line(max_entry_z, FAINT, "max", SPARSE, axis=False),
-                  price_line(-max_entry_z, FAINT, "max", SPARSE, axis=False)]
+    levels = z_levels(side, z_entry, z_exit, exit_plan, entered)
+    width = 2 if side else 1
+    lines = []
+    for z, role, label in levels:
+        color, style = _level_style(z, role, label, side)
+        lines.append(price_line(z, color, label, style, width))
+    if not any(z == 0 for z, _, _ in levels):
+        lines.append(price_line(0.0, BORDER, "", SOLID, 1, axis=False))
+    if max_entry_z and not side:
+        lines += [price_line(max_entry_z, FAINT, "no entry beyond", SPARSE, axis=False),
+                  price_line(-max_entry_z, FAINT, "no entry beyond", SPARSE, axis=False)]
     if what_if and tuple(what_if) != (z_entry, z_exit):
-        wze, wzx = what_if
-        lines += [price_line(wze, AMBER, "what-if", LARGE_DASHED), price_line(-wze, AMBER, "what-if", LARGE_DASHED)]
-        if wzx > 0:
-            lines += [price_line(wzx, AMBER, "", SPARSE, axis=False), price_line(-wzx, AMBER, "", SPARSE, axis=False)]
-    fmt = price_format(2)
-    if tf not in INTRADAY and "z_model" in h and len(h):
-        out.append(series("z_model", "Line", line_data(t, h["z_model"]), 0, legend="model Z",
-                          options={"color": _rgba(VIOLET, 0.55), "lineWidth": 1, "lineStyle": DOTTED,
-                                   "priceFormat": fmt, "lastValueVisible": False, "priceLineVisible": False,
-                                   "crosshairMarkerVisible": False}))
-    out.append(series("z", "Line", line_data(t, h["z"]), 0, lines=lines, legend="Z · strategy",
-                      markers=trade_markers(trades, t, tf_sec, label, reductions),
-                      options={"color": VIOLET if tf not in INTRADAY else CYAN, "lineWidth": 2, "priceFormat": fmt,
-                               "priceLineVisible": False}))
-    if fit_in_use and symbols:
-        live_fit = {k: float(fit_in_use[k]) for k in ("alpha", "beta", "sigma")}
-        out.append(series("z_live", "Line", {"t": [], "v": []}, 0, legend="Z · Binance live",
-                          live={"kind": "z", "a": symbols[0], "b": symbols[1], "fit": live_fit, "tf": tf_sec,
-                                "label": label},
-                          options={"color": CYAN, "lineWidth": 2, "priceFormat": fmt, "lineType": 1,
-                                   "priceLineColor": CYAN}))
-    # Pane 1: the spread with its bands (z x sigma of the fit the strategy uses at each bar).
-    sig = h["sigma"].to_numpy(dtype=float) if len(h) else np.empty(0)
-    sfmt = price_format(4)
-    band_opts = lambda c, s: {"color": c, "lineWidth": 1, "lineStyle": s, "priceFormat": sfmt,  # noqa: E731
+        for z, role, _label in z_levels(side, *what_if, entered=entered):
+            lines.append(price_line(z, AMBER, "what-if" if role == "entry" else "", LARGE_DASHED if role == "entry"
+                                    else SPARSE, axis=role == "entry"))
+    live = None
+    if fit_now and fit_now.get("sigma") and symbols:
+        live = {"a": symbols[0], "b": symbols[1], "tf": tf_sec, "label": "end",
+                "fit": {k: float(fit_now[k]) for k in ("alpha", "beta", "sigma")}}
+    out.append(series("z", "Line", line_data(t, h["z"]), 0, lines=lines, legend="Z", include=[z for z, _, _ in levels],
+                      markers=trade_markers(trades, t, tf_sec, "end", reductions, at_fill_z=True),
+                      live=dict(live, kind="z") if live else None,
+                      options={"color": VIOLET, "lineWidth": 2, "priceFormat": price_format(2), "priceLineVisible": True,
+                               "priceLineColor": VIOLET, "priceLineStyle": DOTTED}))
+    # Pane 1: the spread in % (log A - alpha - beta log B) and its bands, z x sigma of the fit in force.
+    sig = 100 * h["sigma"].to_numpy(dtype=float)
+    pfmt = price_format(2)
+    band_opts = lambda c, s: {"color": c, "lineWidth": 1, "lineStyle": s, "priceFormat": pfmt,  # noqa: E731
                               "lastValueVisible": False, "priceLineVisible": False, "crosshairMarkerVisible": False}
-    for k, c, s, name in ((z_entry, RED, DASHED, "entry"), (zx, GREEN if exit_plan is None else AMBER, DOTTED, "exit")):
-        if k <= 0:
-            continue
-        out.append(series(f"band_{name}_hi", "Line", line_data(t, k * sig), 1, options=band_opts(c, s)))
-        out.append(series(f"band_{name}_lo", "Line", line_data(t, -k * sig), 1, options=band_opts(c, s)))
-    out.append(series("spread", "Line", line_data(t, h["u"]), 1, legend="spread u", digits=4,
-                      lines=[price_line(0.0, BORDER, "", SOLID, axis=False)],
-                      options={"color": TEXT, "lineWidth": 1, "priceFormat": sfmt, "priceLineVisible": False}))
-    if fit_in_use and symbols:
-        out.append(series("spread_live", "Line", {"t": [], "v": []}, 1,
-                          live={"kind": "spread", "a": symbols[0], "b": symbols[1],
-                                "fit": {k: float(fit_in_use[k]) for k in ("alpha", "beta", "sigma")},
-                                "tf": tf_sec, "label": label},
-                          options={"color": CYAN, "lineWidth": 1, "priceFormat": sfmt}))
-    return {"height": height, "panes": [3, 1.2], "series": out, "seconds": False,
+    zero = [price_line(0.0, BORDER, "", SOLID, axis=False)]
+    keep: list[float] = []
+    sig_now = 100 * float(fit_now["sigma"]) if side and fit_now and fit_now.get("sigma") else None
+    for z, role, label in levels:
+        color, style = _level_style(z, role, label, side)
+        if sig_now is not None:  # in a position the fit is frozen: fixed levels
+            zero.append(price_line(z * sig_now, color, label, style, width))
+            keep.append(z * sig_now)
+        elif z == 0:
+            zero = [price_line(0.0, color, label, style, width)]
+            keep.append(0.0)
+        else:
+            out.append(series("band_" + label.replace(" ", "_"), "Line", line_data(t, z * sig), 1,
+                              options=band_opts(color, style)))
+    out.append(series("spread", "Line", line_data(t, 100 * h["u"].to_numpy(dtype=float)), 1, legend="spread %",
+                      lines=zero, include=keep,
+                      live=dict(live, kind="spread", scale=100.0) if live else None,
+                      options={"color": TEXT, "lineWidth": 1, "priceFormat": pfmt, "priceLineVisible": False}))
+    return {"height": height, "panes": [3, 1.3], "series": out, "seconds": False,
             "visible_bars": VISIBLE.get(tf)}
 
 
@@ -320,13 +433,12 @@ def legs_spec(ca: pd.DataFrame | None, cb: pd.DataFrame | None, labels: tuple[st
 
 
 def relative_spec(ca: pd.DataFrame | None, cb: pd.DataFrame | None, labels: tuple[str, str], ids: tuple[str, str],
-                  tf: str, fit_in_use: dict | None, z_entry: float, z_exit: float, trades: pd.DataFrame,
-                  height: int = 520) -> dict:
-    """Both legs rebased to 100, and the Z the candles give under the fit in use."""
+                  tf: str, trades: pd.DataFrame, height: int = 520) -> dict:
+    """Both legs rebased to 100 at the left edge, with the trades (the Z is in the Spread Z view)."""
     tf_sec = TF_SECONDS[tf]
     out: list[dict] = []
     if ca is None or cb is None or ca.empty or cb.empty:
-        return {"height": height, "panes": [1, 1], "series": out}
+        return {"height": height, "panes": [1], "series": out}
     m = ca[["ts", "c"]].merge(cb[["ts", "c"]], on="ts", suffixes=("_a", "_b"))
     t = (m["ts"] // 1000).to_numpy(dtype=np.int64)
     base_a, base_b = float(m["c_a"].iloc[0]), float(m["c_b"].iloc[0])
@@ -334,38 +446,44 @@ def relative_spec(ca: pd.DataFrame | None, cb: pd.DataFrame | None, labels: tupl
     for pane_label, col, base, color, sym in ((labels[0], "c_a", base_a, LEG_A, ids[0]),
                                               (labels[1], "c_b", base_b, LEG_B, ids[1])):
         out.append(series(f"rb_{col}", "Line", line_data(t, 100 * m[col] / base), 0, legend=pane_label,
+                          markers=trade_markers(trades, t, tf_sec, "start") if col == "c_a" else None,
                           live={"kind": "rebased", "symbol": sym, "interval": tf, "base": base},
                           options={"color": color, "lineWidth": 2, "priceFormat": fmt}))
-    if fit_in_use and fit_in_use.get("sigma"):
-        a, b, s = (float(fit_in_use[k]) for k in ("alpha", "beta", "sigma"))
-        z = (np.log(m["c_a"]) - a - b * np.log(m["c_b"])) / s
-        lines = [price_line(z_entry, RED, "entry"), price_line(-z_entry, RED, "entry"),
-                 price_line(0.0, BORDER, "", SOLID, axis=False)]
-        if z_exit > 0:
-            lines += [price_line(z_exit, GREEN, "exit", DOTTED), price_line(-z_exit, GREEN, "exit", DOTTED)]
-        out.append(series("z_fit", "Line", line_data(t, z), 1, legend="Z · today's fit", lines=lines,
-                          markers=trade_markers(trades, t, tf_sec, "start"),
-                          live={"kind": "z", "a": ids[0], "b": ids[1], "fit": {"alpha": a, "beta": b, "sigma": s},
-                                "tf": tf_sec, "label": "start"},
-                          options={"color": VIOLET, "lineWidth": 2, "priceFormat": fmt}))
-    return {"height": height, "panes": [1.4, 1], "series": out, "visible_bars": VISIBLE.get(tf)}
+    return {"height": height, "panes": [1], "series": out, "visible_bars": VISIBLE.get(tf)}
 
 
-def model_spec(fit: pd.DataFrame, live: pd.DataFrame, height: int = 520) -> dict:
-    """Hedge ratio and sigma: what the estimator says now vs the fit the strategy trades on."""
+def model_spec(fit: pd.DataFrame, trades: pd.DataFrame, now_ms: int, *, z_entry: float | None = None,
+               height: int = 600) -> dict:
+    """The estimator against the fit the strategy trades on, hour by hour: hedge ratio, sigma, and
+    the Z each gives. They differ only while a position holds its entry fit (or an override)."""
     out = []
-    if fit is not None and not fit.empty:
-        t = ((fit["bar_ts"] + HOUR) // 1000).to_numpy(dtype=np.int64)
-        f4 = price_format(4)
-        out.append(series("beta_model", "Line", line_data(t, fit["kf_beta"]), 0, legend="β model", digits=4,
-                          options={"color": LEG_A, "lineWidth": 2, "priceFormat": f4}))
-        out.append(series("beta_used", "Line", line_data(t, fit["used_beta"]), 0, legend="β in use", digits=4,
-                          options={"color": AMBER, "lineWidth": 2, "lineType": 1, "priceFormat": f4}))
-        out.append(series("sigma_model", "Line", line_data(t, fit["kf_sigma"]), 1, legend="σ model", digits=4,
-                          options={"color": LEG_A, "lineWidth": 2, "priceFormat": f4}))
-        out.append(series("sigma_used", "Line", line_data(t, fit["used_sigma"]), 1, legend="σ in use", digits=4,
-                          options={"color": AMBER, "lineWidth": 2, "lineType": 1, "priceFormat": f4}))
-    return {"height": height, "panes": [1, 1], "series": out}
+    if fit is None or fit.empty:
+        return {"height": height, "panes": [1, 1, 1.2], "series": out}
+    fit = fit.sort_values("bar_ts")
+    forces = fits_in_force(fit, trades, now_ms)
+    t = ((fit["bar_ts"] + HOUR) // 1000).to_numpy(dtype=np.int64)
+    f4, f2 = price_format(4), price_format(2)
+    model = {"color": LEG_A, "lineWidth": 2, "priceFormat": f4}
+    used = lambda fmt: {"color": AMBER, "lineWidth": 2, "lineType": 1, "priceFormat": fmt}  # noqa: E731
+    out.append(series("beta_model", "Line", line_data(t, fit["kf_beta"]), 0, legend="β model", digits=4,
+                      options=model))
+    out.append(series("beta_used", "Line", line_data(t, forces["beta"]), 0, legend="β in use", digits=4,
+                      options=used(f4)))
+    out.append(series("sigma_model", "Line", line_data(t, fit["kf_sigma"]), 1, legend="σ model", digits=4,
+                      options=model))
+    out.append(series("sigma_used", "Line", line_data(t, forces["sigma"]), 1, legend="σ in use", digits=4,
+                      options=used(f4)))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z_used = (fit["log_a"].to_numpy(float) - forces["alpha"].to_numpy(float)
+                  - forces["beta"].to_numpy(float) * fit["log_b"].to_numpy(float)) / forces["sigma"].to_numpy(float)
+    lines = [price_line(0.0, BORDER, "", SOLID, axis=False)]
+    if z_entry:
+        lines += [price_line(z_entry, RED, "entry"), price_line(-z_entry, RED, "entry")]
+    out.append(series("z_model", "Line", line_data(t, forces["model_z"]), 2, legend="Z if refit now (model)",
+                      options={"color": LEG_A, "lineWidth": 1, "priceFormat": f2}))
+    out.append(series("z_used", "Line", line_data(t, z_used), 2, legend="Z in use", lines=lines,
+                      options={"color": AMBER, "lineWidth": 2, "priceFormat": f2}))
+    return {"height": height, "panes": [1, 1, 1.2], "series": out}
 
 
 # ------------------------------------------------------------------ fund NAV

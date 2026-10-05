@@ -101,12 +101,21 @@ def thinned(db_path: str, table: str, where: str, params: tuple, since_ms: int) 
 @st.cache_data(ttl=5, show_spinner=False, max_entries=8)
 def load_core(db_path: str, version: float, since_ms: int) -> dict[str, pd.DataFrame]:
     q = lambda sql, p=(): query(db_path, sql, p)  # noqa: E731
+    pairs = q("SELECT * FROM pair_state ORDER BY pair_id")
+    sessions = q("SELECT * FROM sessions ORDER BY started_at")
+    steps = capital_added(q("SELECT ts, session_id, payload FROM events WHERE kind='session_start' ORDER BY ts"),
+                          pairs[["pair_id", "capital"]] if len(pairs) else pd.DataFrame(), sessions)
+    equity = q("SELECT * FROM equity WHERE bar_ts >= ? ORDER BY bar_ts", (since_ms - HOUR,))
+    live = thinned(db_path, "equity_live", "1=1", (), since_ms)
+    day0 = q("SELECT ts, session_id, equity FROM equity_live WHERE ts >= ? ORDER BY ts LIMIT 1", (day_start_ms(),))
     return {
-        "sessions": q("SELECT * FROM sessions ORDER BY started_at"),
-        "pairs": q("SELECT * FROM pair_state ORDER BY pair_id"),
-        "equity": q("SELECT * FROM equity WHERE bar_ts >= ? ORDER BY bar_ts", (since_ms - HOUR,)),
-        "equity_live": thinned(db_path, "equity_live", "1=1", (), since_ms),
-        "day_start": q("SELECT equity FROM equity_live WHERE ts >= ? ORDER BY ts LIMIT 1", (day_start_ms(),)),
+        "sessions": sessions,
+        "pairs": pairs,
+        # NAV curves count capital added later from the start (with_capital): a deposit is not a gain.
+        "equity": with_capital(equity, equity["bar_ts"] + HOUR if len(equity) else [], steps, sessions),
+        "equity_live": with_capital(live, live["ts"] if len(live) else [], steps, sessions),
+        "day_start": with_capital(day0, day0["ts"] if len(day0) else [], steps, sessions),
+        "capital_added": steps,
         "marks": q("SELECT * FROM pair_marks WHERE bar_ts >= ? ORDER BY bar_ts", (since_ms - HOUR,)),
         "last_marks": q("SELECT p.* FROM pair_marks p JOIN (SELECT pair_id, MAX(bar_ts) AS ts FROM pair_marks "
                         "GROUP BY pair_id) m ON p.pair_id = m.pair_id AND p.bar_ts = m.ts"),
@@ -123,10 +132,66 @@ def load_core(db_path: str, version: float, since_ms: int) -> dict[str, pd.DataF
 @st.cache_data(ttl=5, show_spinner=False, max_entries=4)
 def load_nav(db_path: str, version: float) -> dict[str, pd.DataFrame]:
     """The whole NAV history for the performance chart: bar-close NAV and the live marks
-    (the last two hours in full, one per minute before that)."""
+    (the last two hours in full, one per minute before that), with capital added later
+    counted from the start (``capital_added``)."""
     live = thinned(db_path, "equity_live", "1=1", (), 0)
-    return {"hourly": query(db_path, "SELECT bar_ts, equity FROM equity ORDER BY bar_ts"),
+    sessions = query(db_path, "SELECT id, started_at FROM sessions")
+    steps = capital_added(query(db_path, "SELECT ts, session_id, payload FROM events WHERE kind='session_start' "
+                                         "ORDER BY ts"),
+                          query(db_path, "SELECT pair_id, capital FROM pair_state"), sessions)
+    hourly = query(db_path, "SELECT bar_ts, session_id, equity FROM equity ORDER BY bar_ts")
+    hourly = with_capital(hourly, hourly["bar_ts"] + HOUR if len(hourly) else [], steps, sessions)
+    live = with_capital(live, live["ts"] if len(live) else [], steps, sessions)
+    return {"hourly": hourly[["bar_ts", "equity"]] if len(hourly) else pd.DataFrame(columns=["bar_ts", "equity"]),
             "live": live[["ts", "equity"]] if not live.empty else pd.DataFrame(columns=["ts", "equity"])}
+
+
+def capital_added(starts: pd.DataFrame, caps: pd.DataFrame, sessions: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Capital of pairs added after the bot's first start, as rows (ts ms, capital).
+
+    ``starts``: the session_start events (each lists the pairs of that session); a pair that
+    first appears in a later session brings its capital in when that session started
+    (``sessions.started_at``; the event's time if unknown): a deposit."""
+    cap = dict(zip(caps["pair_id"], caps["capital"])) if len(caps) else {}
+    begin = _session_starts(sessions)
+    out, seen = [], None
+    for r in starts.itertuples() if len(starts) else ():
+        try:
+            ids = set(json.loads(r.payload or "{}").get("pairs") or [])
+        except (TypeError, ValueError):
+            continue
+        if seen is None:
+            seen = ids
+            continue
+        t = int(begin.get(getattr(r, "session_id", None), r.ts))
+        out += [(t, float(cap[i])) for i in sorted(ids - seen) if cap.get(i)]
+        seen |= ids
+    return pd.DataFrame(out, columns=["ts", "capital"])
+
+
+def _session_starts(sessions: pd.DataFrame | None) -> dict:
+    if sessions is None or sessions.empty or "started_at" not in sessions:
+        return {}
+    return dict(zip(sessions["id"], sessions["started_at"].astype("int64")))
+
+
+def with_capital(frame: pd.DataFrame, ts_ms, steps: pd.DataFrame, sessions: pd.DataFrame | None = None,
+                 col: str = "equity") -> pd.DataFrame:
+    """``frame`` with ``col`` + the capital that arrived after each row, so that NAV curves,
+    returns and drawdowns are not moved by a deposit (as if it had always been there).
+
+    A row counts from the later of its time and the start of the session that wrote it: on
+    start-up the bot records the last closed bar (an earlier time) with its new equity."""
+    if frame is None or frame.empty or steps is None or steps.empty:
+        return frame
+    t = np.asarray(ts_ms, dtype=np.int64)
+    begin = _session_starts(sessions)
+    if begin and "session_id" in frame:
+        b = frame["session_id"].map(begin).to_numpy(dtype=float)
+        t = np.where(np.isfinite(b), np.maximum(t, np.nan_to_num(b)), t).astype(np.int64)
+    st_ts, st_cap = steps["ts"].to_numpy(dtype=np.int64), steps["capital"].to_numpy(dtype=float)
+    later = (st_ts[None, :] > t[:, None]) @ st_cap
+    return frame.assign(**{col: frame[col].to_numpy(dtype=float) + later})
 
 
 @st.cache_data(ttl=5, show_spinner=False, max_entries=8)
@@ -134,9 +199,6 @@ def load_pair(db_path: str, version: float, pair_id: str, since_ms: int) -> dict
     q = lambda sql, p=(): query(db_path, sql, p)  # noqa: E731
     return {
         "fit": q("SELECT * FROM fit_history WHERE pair_id=? AND bar_ts >= ? ORDER BY bar_ts", (pair_id, since_ms - HOUR)),
-        "live": thinned(db_path, "pair_live", "pair_id=?", (pair_id,), since_ms),
-        # The last day at full detail for the intraday charts (1-5-15 min buckets).
-        "live_day": q("SELECT * FROM pair_live WHERE pair_id=? AND ts >= ? ORDER BY ts", (pair_id, now_ms() - 24 * HOUR)),
         "pending": q("SELECT * FROM orders WHERE pair_id=? AND status='pending' ORDER BY id", (pair_id,)),
         "reductions": q("SELECT ts, payload FROM events WHERE pair_id=? AND kind='position_reduced' ORDER BY ts",
                         (pair_id,)),
@@ -288,8 +350,11 @@ def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
             "hours": (now - event_ms(st_["entry_ts"])) / HOUR if side and st_.get("entry_ts", -1) > 0 else np.nan,
             "Z at entry": np.nan,
         }
-        if side and len(t) and t["exit_ts"].isna().any():
-            row["Z at entry"] = float(t[t["exit_ts"].isna()]["z_entry"].iloc[-1])
+        if side and np.isfinite(spread_entry) and sigma:
+            # The Z the fills got, under the position's frozen fit: its PnL moves with Z from here.
+            row["Z at entry"] = spread_entry / sigma
+        elif side and len(t) and t["exit_ts"].isna().any():
+            row["Z at entry"] = float(t[t["exit_ts"].isna()]["z_entry"].iloc[-1])  # the signal's Z
         if side == 0:  # distance (in Z) still to travel before an entry signal
             row["to entry"] = r.z_entry - max(-z_buy, z_sell) if np.isfinite(z) else np.nan
             row["to exit"] = np.nan

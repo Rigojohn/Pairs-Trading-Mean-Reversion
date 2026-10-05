@@ -135,9 +135,43 @@ def cmd_test(cfg: AppConfig, args) -> None:
 
 
 def cmd_research(cfg: AppConfig, args) -> None:
+    if getattr(args, "final", False):
+        cmd_final(cfg, args)
+        return
     cmd_funnel(cfg, args)
     cmd_calibrate(cfg, args)
     cmd_test(cfg, args)
+
+
+def cmd_final(cfg: AppConfig, args) -> None:
+    """Pairs for trading now: funnel and calibration on ALL data up to the archive's end, no test.
+
+    The method was already chosen and tested on held-out windows (experiments); the final
+    model then learns from everything, and paper trading is its out-of-sample test.
+    """
+    from cryptopairs.research.calibrate import calibrate_all, pairs_yaml
+
+    store = _store(cfg)
+    ends = [int(ts.iloc[-1]) for ts in (store.load_klines(s)["ts"] for s in store.symbols()) if len(ts)]
+    if not ends:
+        raise SystemExit("no downloaded symbols; run 'download' first")
+    data_end = max(ends)
+    cfg.research.test_start = data_end + 3_600_000  # everything up to data_end is training data
+    cfg.research.test_end = data_end + 3_600_000
+    log.info("final calibration on data up to %s UTC (no test window)", pd.Timestamp(data_end, unit="ms"))
+    table = cmd_funnel(cfg, args)
+    pairs = list(zip(table["a"], table["b"]))[: args.top + 10]  # spares for pairs that fail calibration
+    cals = calibrate_all(pairs, cfg)
+    best = pd.DataFrame([{"a": c.a, "b": c.b, **c.best} for c in cals if c.best is not None])
+    if best.empty:
+        raise SystemExit("no pair could be calibrated")
+    out = _run_dir(cfg, args.tag)
+    best.to_csv(out / "calibration_best.csv", index=False)
+    doc = pairs_yaml(best.assign(pair=best["a"] + "-" + best["b"]), table, args.top, "ic")
+    (out / "pairs.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    (out / "final.json").write_text(json.dumps({"data_end": str(pd.Timestamp(data_end, unit="ms")),
+                                                "profile": cfg.profile, "pairs": len(doc["pairs"])}, indent=2))
+    log.info("wrote %s (%d pairs, ranked by IC, trained on all data)", out / "pairs.yaml", len(doc["pairs"]))
 
 
 def cmd_experiments(cfg: AppConfig, args) -> None:
@@ -295,6 +329,9 @@ def main(argv: list[str] | None = None) -> None:
         if name in ("test", "research"):
             sp.add_argument("--top", type=int, default=20, help="pairs to put in pairs.yaml")
             sp.add_argument("--rank-by", choices=["ic", "test_sharpe", "none"], default="ic")
+        if name == "research":
+            sp.add_argument("--final", action="store_true",
+                            help="train on all data up to the archive's end, no test window (pairs to trade now)")
 
     xp = sub.add_parser("experiments", help="compare strategy variants (validation picks, test confirms)")
     xp.add_argument("--out", default="runs/experiments")

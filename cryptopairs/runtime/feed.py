@@ -127,6 +127,8 @@ class DataFeed:
         max_concurrency: int = 4,
         snapshot_s: float = 20.0,
         trade_stream: bool = False,
+        archive: Callable[[str], list[list[Any]]] | None = None,
+        capacity: int | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -136,7 +138,11 @@ class DataFeed:
         self.timeframe, self.tf_ms = timeframe, tf_ms
         self.grace_s, self.quote_stale_ms = grace_s, int(quote_stale_s * 1000)
         self.snapshot_s = snapshot_s
-        self.candles = CandleStore(capacity=self.history_bars + 48, tf_ms=tf_ms)
+        # archive(symbol) -> stored closed candles [ts, open, high, low, close] to start from;
+        # REST then fills from the archive's last bar. Without it (or for a symbol the archive
+        # lacks) the feed starts from the last ``history_bars`` bars over REST.
+        self.archive = archive
+        self.candles = CandleStore(capacity=capacity or self.history_bars + 48, tf_ms=tf_ms)
         self._quotes: dict[str, Quote] = {}
         self._sem = asyncio.Semaphore(max_concurrency)
         self._clock, self._sleep = clock, sleep
@@ -188,9 +194,16 @@ class DataFeed:
         since = last_closed - (self.history_bars - 1) * self.tf_ms
 
         async def one(sym: str) -> None:
-            rows = await self._fetch_closed(sym, since, last_closed)
+            stored = [r for r in (self.archive(sym) if self.archive else []) if r[0] <= last_closed]
+            if stored:
+                self.candles.add(sym, stored)
+            last = self.candles.last_ts(sym)
+            rows = await self._fetch_closed(sym, since if last is None else last + self.tf_ms, last_closed)
             self.candles.add(sym, rows)
-            log.info("backfilled %s: %d bars", sym, len(rows))
+            if stored:
+                log.info("backfilled %s: %d archive + %d REST bars", sym, len(stored), len(rows))
+            else:
+                log.info("backfilled %s: %d bars", sym, len(rows))
 
         await asyncio.gather(*(one(s) for s in self.symbols))
 

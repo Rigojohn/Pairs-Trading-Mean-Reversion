@@ -21,6 +21,29 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Trial bot B (2026-10-05): the audit fixes (Kalman on the whole archive, fresh pairs, a per-coin
+  # exposure cap) next to bot A, with its own state/kalman_b.db and logs/kalman_b.log. The dashboard
+  # lists it in the sidebar. Remove this service to stop the trial; A is not affected.
+  bot_b:
+    build: .                          # same Dockerfile as the bot: built from the cache
+    container_name: cryptopairs-b
+    restart: unless-stopped
+    command: ["--profile", "kalman_b", "paper", "--name", "kalman_b", "--pairs", "runs/kalman_b/pairs.yaml"]
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - ./runs/kalman_b:/app/runs/kalman_b:ro
+      - ./data:/app/data:ro           # the Kalman starts from the same archive as the backtest
+    environment:
+      - TZ=UTC
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   dashboard:
     build: .                          # same Dockerfile as the bot: the second build comes from the cache
     container_name: cryptopairs-dashboard

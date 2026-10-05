@@ -136,3 +136,25 @@ profiles:
       min_train_trades: 5
     runtime:
       execution: maker_first
+  kalman_b:                        # trial bot B (2026-10-05): kalman + the audit fixes; A keeps running unchanged
+    strategy:
+      leverage: 2.0
+      catastrophe_stop_pct: 0.35
+      min_edge_cost_multiple: 1.5
+      estimator: kalman
+      max_entry_z: 10.0
+      kalman_history: null           # the whole archive (data/) + REST, as the backtest and the calibration
+    costs:
+      half_spread_bps: 5
+      slippage_bps: 5
+      funding: true
+      fill_on: next_open
+      intrabar_stop: false
+      maker_legs: 1
+    research:
+      min_train_trades: 5
+    risk:
+      max_symbol_gross_leverage: 0.15  # one coin <= 15% of total equity gross (~2 legs at EUR 100/pair, 2x)
+    runtime:
+      execution: maker_first
+      realtime_exits: true           # 2026-10-05, user: exit the moment Z hits the exit band (checked every 5 s)

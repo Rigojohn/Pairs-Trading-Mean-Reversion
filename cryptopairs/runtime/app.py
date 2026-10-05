@@ -77,6 +77,31 @@ def price_tick(exchange, symbol: str) -> float:
     return float(prec) if exchange.precisionMode == ccxt.TICK_SIZE else 10.0 ** (-int(prec))
 
 
+# With strategy.kalman_history = None: bars kept per symbol (~11 years of hours), and the REST
+# history used for a symbol the local archive lacks.
+ARCHIVE_CAPACITY = 100_000
+REST_KALMAN_BARS = 8760
+
+
+def archive_loader(exchange, data_dir: Path):
+    """symbol -> its stored 1h candles from the research archive (data/klines/1h/<ID>.pkl).
+
+    The bot then filters the same series the backtest and the calibration used.
+    """
+    from cryptopairs.research.data import DataStore
+
+    store = DataStore(data_dir, "1h")
+
+    def load(symbol: str) -> list[list]:
+        df = store.load_klines(exchange.market(symbol)["id"])
+        if df.empty:
+            log.warning("%s: not in the local archive %s; using %d REST bars", symbol, data_dir, REST_KALMAN_BARS)
+            return []
+        return df[["ts", "open", "high", "low", "close"]].to_numpy().tolist()
+
+    return load
+
+
 def build_specs(exchange, pairs: list[dict], capital: float) -> list[PairSpec]:
     specs = []
     for p in pairs:
@@ -162,16 +187,21 @@ async def run_app(cfg: AppConfig) -> None:
         if not specs:
             raise SystemExit("no tradable pairs")
         symbols = sorted({s.symbol_a for s in specs} | {s.symbol_b for s in specs})
+        full_archive = cfg.strategy.kalman_history is None
+        kalman_bars = REST_KALMAN_BARS if full_archive else cfg.strategy.kalman_history
         history = max(
-            max(cfg.strategy.kalman_history, s.params.lookback) if s.params.kalman_delta else s.params.lookback
+            max(kalman_bars, s.params.lookback) if s.params.kalman_delta else s.params.lookback
             for s in specs
         ) + 48
-        log.info("paper session %s: %d pairs, %d symbols, %d bars of history, state in %s",
-                 session, len(specs), len(symbols), history, store.path)
+        archive = archive_loader(exchange, Path(cfg.data.dir)) if full_archive else None
+        log.info("paper session %s: %d pairs, %d symbols, %s, state in %s", session, len(specs), len(symbols),
+                 f"kalman history: full archive ({cfg.data.dir}/klines/1h) + REST" if full_archive
+                 else f"{history} bars of history", store.path)
         maker_first = rt.execution == "maker_first"
         feed = DataFeed(exchange, symbols, history, grace_s=rt.bar_grace_seconds,
                         quote_stale_s=rt.quote_stale_seconds, max_concurrency=rt.max_rest_concurrency,
-                        snapshot_s=rt.quote_snapshot_seconds, trade_stream=maker_first)
+                        snapshot_s=rt.quote_snapshot_seconds, trade_stream=maker_first,
+                        archive=archive, capacity=ARCHIVE_CAPACITY if full_archive else None)
         await feed.start()
         risk = RiskManager(cfg.risk)
         risk.peak_equity = store.kv_get("risk.peak_equity")
@@ -266,11 +296,23 @@ async def run_app(cfg: AppConfig) -> None:
                 await asyncio.sleep(cfg.risk.stop_check_seconds)
                 await engine.check_stops()
 
+        async def exit_loop() -> None:
+            while True:  # exits on live quotes between bar closes (runtime.realtime_exits)
+                await asyncio.sleep(rt.exit_check_seconds)
+                try:
+                    await engine.check_exits_live()
+                except Exception:
+                    log.exception("live exit check failed")
+
         tasks.append(asyncio.create_task(bar_loop(), name="bars"))
         tasks.append(asyncio.create_task(live_loop(), name="live"))
         tasks.append(asyncio.create_task(command_loop(), name="commands"))
         if cfg.risk.continuous_stop or cfg.strategy.catastrophe_stop_pct is not None:
             tasks.append(asyncio.create_task(stop_loop(), name="stops"))
+        if rt.realtime_exits:
+            log.info("realtime exits: on (live Z checked every %.0fs; entries and stop-loss on bar close)",
+                     rt.exit_check_seconds)
+            tasks.append(asyncio.create_task(exit_loop(), name="exits"))
         waiter = asyncio.create_task(stop.wait(), name="signal")
         done, _ = await asyncio.wait([*tasks, waiter], return_when=asyncio.FIRST_COMPLETED)
         for t in done:

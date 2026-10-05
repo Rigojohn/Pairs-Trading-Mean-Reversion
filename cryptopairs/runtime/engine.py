@@ -18,13 +18,14 @@ import logging
 import math
 
 import numpy as np
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from cryptopairs.config import HOUR_MS, AppConfig
 from cryptopairs.core.book import PairBook
 from cryptopairs.core.signals import fit_ols, kalman_filter, ou_half_life, rolling_ols
-from cryptopairs.core.sizing import LotRules, SizingError, round_to_lots, signed_quantities, target_quantities
-from cryptopairs.core.strategy import FLAT, STOP_REASONS, PairParams, PairStrategy
+from cryptopairs.core.sizing import (LotRules, SizingError, floor_to_step, round_to_lots, signed_quantities,
+                                     target_quantities)
+from cryptopairs.core.strategy import FLAT, LONG, SHORT, STOP_REASONS, PairParams, PairStrategy
 from cryptopairs.runtime.execution import ExecutionEngine, ExecutionReport, PairOrder
 from cryptopairs.runtime.feed import DataFeed
 from cryptopairs.runtime.risk import RiskManager
@@ -72,6 +73,7 @@ class Intent:
     zs: float = math.nan
     marks: "Marks | None" = None
     half_life: float = math.nan
+    entry_reason: str = "signal"  # "manual" for an entry from the dashboard order ticket
 
 
 @dataclass
@@ -122,6 +124,8 @@ class StrategyEngine:
         self.pairs = [self._restore(s, stored.get(s.id)) for s in specs]
         store.save_pairs(self.pairs)
         self._lock = asyncio.Lock()
+        # Manual orders worked in the background (maker-first can take minutes).
+        self._background: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------ restore
     def _with_override(self, spec: PairSpec) -> PairSpec:
@@ -276,14 +280,17 @@ class StrategyEngine:
         side = strat.check_entry(bar_ts, bar_index, zb, zs)
         if side == FLAT:
             return None
-        order = self._open_order(pr, side, marks, pending_gross, pending_opens)
+        order, _ = self._open_order(pr, side, marks, pending_gross, pending_opens)
         if order is None:
             return None
-        hl = math.nan
-        if self.cfg.strategy.time_stop_halflives is not None:
-            f = strat.fit
-            hl = ou_half_life(window[0][-L:] - f.alpha - f.beta * window[1][-L:])
-        return Intent(pr, order, bar_ts, bar_index, side, zb, zs, marks, hl)
+        return Intent(pr, order, bar_ts, bar_index, side, zb, zs, marks, self._half_life(pr, window))
+
+    def _half_life(self, pr: PairRuntime, window: tuple[np.ndarray, np.ndarray]) -> float:
+        """Spread half-life for the time stop (only computed when that overlay is on)."""
+        if self.cfg.strategy.time_stop_halflives is None or pr.strat.fit is None:
+            return math.nan
+        f, L = pr.strat.fit, pr.spec.params.lookback
+        return ou_half_life(window[0][-L:] - f.alpha - f.beta * window[1][-L:])
 
     def _window(self, pr: PairRuntime, bar_ts: int,
                 params: PairParams | None = None) -> tuple[np.ndarray, np.ndarray] | None:
@@ -304,21 +311,23 @@ class StrategyEngine:
 
     # ------------------------------------------------------------- orders
     def _open_order(self, pr: PairRuntime, side: int, marks: Marks, pending_gross: dict[str, float],
-                    pending_opens: int) -> PairOrder | None:
-        """Size the entry and ask the risk manager; None if skipped or rejected."""
+                    pending_opens: int, leverage: float | None = None,
+                    reason: str | None = None) -> tuple[PairOrder | None, str]:
+        """Size the entry and ask the risk manager. Returns (order, "") or (None, why not)."""
         s, strat, book = pr.spec, pr.strat, pr.book
         beta = strat.fit.beta
+        lev = self.cfg.strategy.leverage if leverage is None else leverage
         try:
-            qa, qb = target_quantities(book.cash, self.cfg.strategy.leverage, beta, marks.mid_a, marks.mid_b)
+            qa, qb = target_quantities(book.cash, lev, beta, marks.mid_a, marks.mid_b)
             if s.lots_a is not None and s.lots_b is not None:
                 qa, qb = round_to_lots(qa, qb, marks.mid_a, marks.mid_b, s.lots_a, s.lots_b, beta)
         except SizingError as exc:
             self.store.event("entry_skipped", s.id, reason=str(exc))
             log.info("%s: entry skipped: %s", s.id, exc)
-            return None
+            return None, f"cannot be sized: {exc}"
         sa, sb = signed_quantities(side, qa, qb)
         order = PairOrder(s.id, "open", s.symbol_a, s.symbol_b, sa, sb, marks.mid_a, marks.mid_b,
-                          "long_spread" if side > 0 else "short_spread")
+                          reason or ("long_spread" if side > 0 else "short_spread"))
         gross = self.gross_by_symbol()
         for sym, v in pending_gross.items():
             gross[sym] = gross.get(sym, 0.0) + v
@@ -327,8 +336,8 @@ class StrategyEngine:
         if not decision.approved:
             self.store.event("entry_rejected", s.id, reason=decision.reason)
             log.info("%s: entry rejected by risk: %s", s.id, decision.reason)
-            return None
-        return order
+            return None, f"rejected by risk: {decision.reason}"
+        return order, ""
 
     @staticmethod
     def _close_order(pr: PairRuntime, reason: str, marks: Marks) -> PairOrder:
@@ -360,13 +369,16 @@ class StrategyEngine:
                 self.store.event("execution_imbalance", s.id, error=report.error,
                                  fills=[(f.symbol, f.qty, f.price) for f in traded])
                 log.error("%s: PARTIAL EXECUTION %s; manual check needed", s.id, traded)
-            kind = "entry_failed" if order.kind == "open" else "exit_failed"
+            kind = {"open": "entry_failed", "reduce": "reduce_failed"}.get(order.kind, "exit_failed")
             self.store.event(kind, s.id, reason=order.reason, error=report.error)
             log.error("%s: %s (%s): %s", s.id, kind.upper(), order.reason, report.error)
             return False
         if order.kind == "open":
-            self._apply_open(pr, it.side, it.ts, it.bar_index, it.zb, it.zs, it.marks, report, it.half_life)
+            self._apply_open(pr, it.side, it.ts, it.bar_index, it.zb, it.zs, it.marks, report, it.half_life,
+                             it.entry_reason)
             self.store.commit_open(order_id, report, pr)
+        elif order.kind == "reduce":
+            self._apply_reduce(pr, it.ts, report, order_id)
         else:
             self._apply_close(pr, order.reason, it.ts, report, order_id)
         if report.stats:  # diagnostics only: recorded after the fill is safely stored
@@ -378,7 +390,7 @@ class StrategyEngine:
 
     def _apply_open(self, pr: PairRuntime, side: int, ts: int, bar_index: int,
                     zb: float, zs: float, marks: Marks, report: ExecutionReport,
-                    half_life: float = math.nan) -> None:
+                    half_life: float = math.nan, entry_reason: str = "signal") -> None:
         s, strat, book = pr.spec, pr.strat, pr.book
         qa, qb = report.qty(s.symbol_a), report.qty(s.symbol_b)
         cash_before = book.cash
@@ -392,13 +404,35 @@ class StrategyEngine:
             "alpha": f.alpha, "beta": f.beta, "sigma": f.sigma,
             "qty_a": qa, "qty_b": qb,
             "entry_px_a": report.price(s.symbol_a), "entry_px_b": report.price(s.symbol_b),
-            "equity_before": cash_before, "fees": report.fee, "funding": 0.0,
+            "equity_before": cash_before, "fees": report.fee, "funding": 0.0, "entry_reason": entry_reason,
             # Expected log-spread return to the exit band per unit notional (paper 5.2).
             "expected_ret": f.sigma / (1 + f.beta) * (abs(zb if side > 0 else zs) - s.params.z_exit),
         }
-        log.info("%s: OPEN %s z=%.2f beta=%.3f sigma=%.4f qty=(%.6g, %.6g) fee=%.4f maker=%s",
-                 s.id, "LONG" if side > 0 else "SHORT", pr.trade["z_entry"], f.beta, f.sigma,
-                 qa, qb, report.fee, report.stats.get("maker_share"))
+        log.info("%s: OPEN %s%s z=%.2f beta=%.3f sigma=%.4f qty=(%.6g, %.6g) fee=%.4f maker=%s",
+                 s.id, "LONG" if side > 0 else "SHORT", " (manual)" if entry_reason == "manual" else "",
+                 pr.trade["z_entry"], f.beta, f.sigma, qa, qb, report.fee, report.stats.get("maker_share"))
+
+    def _apply_reduce(self, pr: PairRuntime, ts: int, report: ExecutionReport, order_id: int) -> None:
+        """A manual partial close: realize part of the PnL; the trade stays open."""
+        s, book = pr.spec, pr.book
+        qa, qb = report.qty(s.symbol_a), report.qty(s.symbol_b)
+        realized = book.reduce(qa, qb, report.price(s.symbol_a), report.price(s.symbol_b), report.fee)
+        if pr.trade is not None:
+            pr.trade["fees"] = (pr.trade.get("fees") or 0.0) + report.fee
+        if not book.in_position:  # never planned (the ticket keeps a remainder), but stay consistent
+            pr.strat.on_closed("manual_close", ts)
+            trade = pr.trade or {"pair_id": s.id}
+            trade.update(exit_ts=ts, reason="manual_close", exit_px_a=report.price(s.symbol_a),
+                         exit_px_b=report.price(s.symbol_b), equity_after=book.cash,
+                         pnl=book.cash - (trade.get("equity_before") or book.cash))
+            pr.trade = None
+            self.store.commit_close(order_id, report, pr, trade)
+            return
+        self.store.commit_reduce(order_id, report, pr)
+        self.store.event("position_reduced", s.id, traded_a=qa, traded_b=qb, realized=realized, fee=report.fee,
+                         remaining_a=book.qty_a, remaining_b=book.qty_b)
+        log.info("%s: REDUCE qty=(%.6g, %.6g) realized=%.4f fee=%.4f, left (%.6g, %.6g)", s.id, qa, qb,
+                 realized, report.fee, book.qty_a, book.qty_b)
 
     def _apply_close(self, pr: PairRuntime, reason: str, ts: int, report: ExecutionReport, order_id: int) -> None:
         s, strat, book = pr.spec, pr.strat, pr.book
@@ -422,11 +456,30 @@ class StrategyEngine:
 
     async def _close(self, pr: PairRuntime, reason: str, ts: int, marks: Marks) -> bool:
         """Immediate close under the caller's lock (stops, kill switch): market orders only."""
-        order = self._close_order(pr, reason, marks)
-        order = PairOrder(**{**order.__dict__, "urgent": True})
-        order_id, _client_id = self.store.order_pending(order)
-        report = await self.execution.execute(order)
-        return self._settle(Intent(pr, order, ts, marks=marks), order_id, report)
+        order = replace(self._close_order(pr, reason, marks), urgent=True)
+        return await self._execute_now(Intent(pr, order, ts, marks=marks))
+
+    async def _execute_now(self, it: Intent) -> bool:
+        """Write-ahead, execute and settle under the caller's lock (market orders: seconds)."""
+        order_id, _client_id = self.store.order_pending(it.order)
+        report = await self.execution.execute(it.order)
+        return self._settle(it, order_id, report)
+
+    def _spawn(self, coro) -> None:
+        """Run a manual order in the background; the pair stays busy until it settles."""
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def wait_background(self) -> None:
+        """Wait for manual orders still being worked (tests, orderly shutdown)."""
+        while self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)
+
+    async def cancel_background(self) -> None:
+        for t in list(self._background):
+            t.cancel()
+        await asyncio.gather(*list(self._background), return_exceptions=True)
 
     # ------------------------------------------------------------- funding
     async def settle_funding(self, until_ms: int) -> float:
@@ -542,8 +595,107 @@ class StrategyEngine:
         self.entries_paused = paused
         self.store.kv_set("entries_paused", paused)
 
-    async def close_pair(self, pair_id: str, reason: str = "manual_close") -> tuple[bool, str]:
-        """Close one pair now with market orders (dashboard button)."""
+    async def open_pair(self, pair_id: str, side: int, leverage: float | None = None,
+                        execution: str = "market") -> tuple[bool, str]:
+        """Open a position now, on the trader's call instead of the Z signal (dashboard ticket).
+
+        Sizing, lot rounding and the risk checks are those of an automatic entry, and from
+        then on the strategy manages the exit and the stops as usual. A pause or a cooldown
+        only stops automatic entries, so neither blocks this; a deactivated pair, a broken
+        fit or stale quotes do. ``execution``: "market", or "maker" (post-only first, as the
+        bot's own entries; worked in the background for up to the maker timeout).
+        """
+        if side not in (LONG, SHORT):
+            return False, "side must be +1 (long spread) or -1 (short spread)"
+        if execution not in ("market", "maker"):
+            return False, f"unknown execution {execution!r}"
+        sc = self.cfg.strategy
+        cap = self.cfg.risk.manual_max_leverage or sc.leverage
+        lev = sc.leverage if leverage is None else float(leverage)
+        if not (math.isfinite(lev) and 0 < lev <= cap * (1 + 1e-9)):
+            return False, f"leverage must be above 0 and at most {cap:g}x"
+        async with self._lock:
+            pr = self.pair(pair_id)
+            if pr is None:
+                return False, "unknown pair"
+            s, strat = pr.spec, pr.strat
+            if s.close_only:
+                return False, "this pair is no longer in the pairs file; it is only being closed"
+            if strat.side != FLAT:
+                return False, "the pair already holds a position; close it first"
+            if pr.busy:
+                return False, "an order is being executed for this pair; try again in a minute"
+            if strat.deactivated:
+                return False, "the pair is deactivated (equity floor reached)"
+            m = self._marks(pr)
+            if m is None or not m.quotes_ok:
+                return False, "no fresh quotes for both legs"
+            bar_ts = self.feed.last_closed_bar()
+            window = self._window(pr, bar_ts)
+            if strat.fit is None:  # e.g. new parameters: fit on the last closed bar first
+                if window is None:
+                    return False, "not enough price history to fit the spread"
+                strat.set_fit(*self._estimate(pr, window), bar_ts // HOUR_MS)
+                if strat.fit is None:
+                    return False, "the spread fit is not valid right now"
+            f = strat.fit
+            if not sc.beta_min <= f.beta <= sc.beta_max:
+                return False, f"hedge ratio β {f.beta:.3f} is outside [{sc.beta_min:g}, {sc.beta_max:g}]"
+            zb, zs = strat.z_scores(m.log_bid_a, m.log_ask_a, m.log_bid_b, m.log_ask_b)
+            z = zb if side == LONG else zs
+            if not math.isfinite(z):
+                return False, "no valid Z right now"
+            if sc.max_entry_z is not None and abs(z) > sc.max_entry_z:
+                return False, f"|Z| {abs(z):.1f} is above max_entry_z {sc.max_entry_z:g}: the prices look broken"
+            order, why = self._open_order(pr, side, m, {}, 0, leverage=lev, reason="manual_open")
+            if order is None:
+                return False, why
+            order = replace(order, urgent=execution == "market")
+            signal = (side == LONG and z < -s.params.z_entry) or (side == SHORT and z > s.params.z_entry)
+            it = Intent(pr, order, self.feed.now_ms(), bar_ts // HOUR_MS, side, zb, zs, m,
+                        self._half_life(pr, window) if window is not None else math.nan, entry_reason="manual")
+            pr.busy = True
+            self.store.event("manual_open", s.id, side=side, leverage=lev, execution=execution, z=z,
+                             with_signal=signal, paused=s.id in self.paused_pairs or self.entries_paused,
+                             cooldown=strat.cooldown_until > self.feed.now_ms())
+        self._spawn(self._run(it))
+        name = "LONG" if side == LONG else "SHORT"
+        return True, (f"{name} spread submitted at Z {z:+.2f}, {lev:g}x, {self._how(execution)}"
+                      + ("" if signal else "; no entry signal now (manual call)"))
+
+    def _how(self, execution: str) -> str:
+        if execution == "market":
+            return "market orders"
+        if not getattr(self.execution, "maker_first", False):
+            return "market orders (this bot is configured for taker execution)"
+        return f"maker first (up to {getattr(self.execution, 'timeout_s', 0):.0f} s, then market)"
+
+    def _reduce_order(self, pr: PairRuntime, fraction: float, marks: Marks) -> PairOrder:
+        """Trade ``fraction`` of both legs against the holdings, rounded down to the lot step."""
+        s, book = pr.spec, pr.book
+        legs = []
+        for held, rules in ((book.qty_a, s.lots_a), (book.qty_b, s.lots_b)):
+            q = abs(held) * fraction
+            if rules is not None:
+                q = floor_to_step(q, rules.step)
+                left = abs(held) - q
+                if left > 1e-12 and (left < max(rules.min_qty, rules.step) - 1e-12):
+                    raise SizingError("the rest would be below the exchange minimum; close 100% instead")
+            if not q > 0:
+                raise SizingError("this fraction is smaller than one lot; choose a larger one")
+            legs.append(-math.copysign(q, held))
+        return PairOrder(s.id, "reduce", s.symbol_a, s.symbol_b, legs[0], legs[1], marks.mid_a, marks.mid_b,
+                         "manual_reduce")
+
+    async def close_pair(self, pair_id: str, reason: str = "manual_close", fraction: float = 1.0,
+                         execution: str = "market") -> tuple[bool, str]:
+        """Close all or part of a position (dashboard). A full market close runs at once;
+        maker-first or partial closes run in the background like the bot's own orders."""
+        if not (math.isfinite(fraction) and 0 < fraction <= 1):
+            return False, "fraction must be above 0 and at most 1"
+        if execution not in ("market", "maker"):
+            return False, f"unknown execution {execution!r}"
+        full = fraction >= 0.999
         async with self._lock:
             pr = self.pair(pair_id)
             if pr is None:
@@ -555,9 +707,62 @@ class StrategyEngine:
             m = self._marks(pr)
             if m is None:
                 return False, "no prices for this pair"
-            ok = await self._close(pr, reason, self.feed.now_ms(), m)
+            now = self.feed.now_ms()
+            if full and execution == "market":
+                ok = await self._close(pr, reason, now, m)
+                self.store.save_pairs(self.pairs)
+                return ok, "closed at market" if ok else "close failed (see events)"
+            if full:
+                order = replace(self._close_order(pr, reason, m), urgent=False)
+            else:
+                try:
+                    order = self._reduce_order(pr, fraction, m)
+                except SizingError as exc:
+                    return False, str(exc)
+                order = replace(order, urgent=execution == "market")
+            it = Intent(pr, order, now, now // HOUR_MS, marks=m)
+            if order.urgent:  # a market reduction takes a second: settle it now, under the lock
+                ok = await self._execute_now(it)
+                self.store.save_pairs(self.pairs)
+                return ok, f"reduced by {fraction:.0%} at market" if ok else "reduction failed (see events)"
+            pr.busy = True
+        self._spawn(self._run(it))
+        what = "close" if full else f"reduction by {fraction:.0%}"
+        return True, f"{what} submitted, {self._how(execution)}"
+
+    async def set_exit_plan(self, pair_id: str, z_exit: float | None = None,
+                            stop_loss_pct: float | None = None) -> tuple[bool, str]:
+        """Exit band and stop-loss for the open position only (cleared when it closes).
+
+        ``None`` keeps the pair's rule. The catastrophe stop is a hard limit and stays.
+        """
+        async with self._lock:
+            pr = self.pair(pair_id)
+            if pr is None:
+                return False, "unknown pair"
+            strat = pr.strat
+            if strat.side == FLAT:
+                return False, "no open position (for future trades change the parameters instead)"
+            if z_exit is not None and not (math.isfinite(z_exit) and 0 <= z_exit < strat.params.z_entry):
+                return False, f"exit Z must be at least 0 and below the entry threshold {strat.params.z_entry:g}"
+            cat = self.cfg.strategy.catastrophe_stop_pct
+            top = cat if cat is not None else 1.0
+            if stop_loss_pct is not None and not (math.isfinite(stop_loss_pct) and 0 < stop_loss_pct < top):
+                return False, (f"stop-loss must be above 0% and below the catastrophe stop {top:.0%}" if cat
+                               else "stop-loss must be between 0% and 100%")
+            strat.z_exit_override = None if z_exit is None else float(z_exit)
+            strat.stop_pct_override = None if stop_loss_pct is None else float(stop_loss_pct)
             self.store.save_pairs(self.pairs)
-            return ok, "closed at market" if ok else "close failed (see events)"
+            m = self._marks(pr)
+            eq = pr.book.equity(m.mid_a, m.mid_b) if m else pr.book.cash
+            self.store.event("exit_plan", pair_id, z_exit=z_exit, stop_loss_pct=stop_loss_pct,
+                             stop_level=strat.stop_level(), equity=eq)
+            log.info("%s: exit plan z_exit=%s stop=%s (stop level %.4f, equity %.4f)", pair_id, z_exit,
+                     stop_loss_pct, strat.stop_level(), eq)
+            msg = f"exit at Z ±{strat.exit_z():g}, stop at {strat.stop_level():,.2f} USDT equity"
+            if eq <= strat.stop_level():
+                msg += " (already below it: stops at the next check)"
+            return True, msg
 
     async def set_params(self, pair_id: str, params: PairParams | None) -> tuple[bool, str]:
         """Manual parameter override (dashboard); ``None`` restores the calibrated parameters.

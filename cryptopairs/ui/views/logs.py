@@ -54,10 +54,10 @@ def live() -> None:
             k.metric("Warnings", f"{int((log['level'] == 'WARNING').sum())}")
             k.metric("Errors", f"{int(log['level'].isin(['ERROR', 'CRITICAL']).sum())}")
             last = log["time"].iloc[-1]
-            k.metric("Last line", f"{last:%H:%M:%S}" if pd.notna(last) else "—", "local time", delta_color="off", delta_arrow="off")
+            k.metric("Last line", f"{last:%H:%M:%S}" if pd.notna(last) else "—", f"{D.TZ_LABEL} time", delta_color="off", delta_arrow="off")
             st.dataframe(view.style.map(_level_color, subset=["level"]), width="stretch", hide_index=True, placeholder="", height=560,
                          key="lg_tail",
-                         column_config={"time": st.column_config.DatetimeColumn("time (local)", format="MM-DD HH:mm:ss"),
+                         column_config={"time": st.column_config.DatetimeColumn("time", format="DD/MM HH:mm:ss"),
                                         "message": st.column_config.TextColumn(width="large")})
             st.download_button("Download this view", view.to_csv(index=False).encode(), f"{p.stem}_log.csv", "text/csv",
                                on_click="ignore")
@@ -70,11 +70,11 @@ def live() -> None:
             pick = st.multiselect("Event kinds", kinds, default=[], key="ev_kinds", placeholder="all kinds")
             e = ev[ev["kind"].isin(pick)] if pick else ev
             st.dataframe(pd.DataFrame({
-                "time (UTC)": D.to_time(e["ts"]), "event": e["kind"], "pair": e["pair_id"].fillna(""),
+                "time": D.to_time(e["ts"]), "event": e["kind"], "pair": e["pair_id"].fillna(""),
                 "details": e["payload"].fillna("").map(lambda s: "" if s in ("", "{}") else ", ".join(
                     f"{k}={v}" for k, v in json.loads(s).items())),
             }), width="stretch", hide_index=True, placeholder="", height=560, key="lg_events",
-                column_config={"time (UTC)": st.column_config.DatetimeColumn(format="MM-DD HH:mm:ss"),
+                column_config={"time": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss"),
                                "details": st.column_config.TextColumn(width="large")})
 
 

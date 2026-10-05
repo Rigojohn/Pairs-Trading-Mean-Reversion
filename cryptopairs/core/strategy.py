@@ -61,6 +61,7 @@ class PairStrategy:
         "params", "cfg", "initial_equity", "round_trip_cost", "anchor", "long_pays_funding",
         "side", "fit", "entry_equity", "entry_index", "entry_ts", "prev_exit_z",
         "cooldown_until", "deactivated", "peak_equity", "_cooldown_ms", "hold_limit",
+        "z_exit_override", "stop_pct_override",
     )
 
     def __init__(
@@ -93,6 +94,9 @@ class PairStrategy:
         self.peak_equity = float(initial_equity)
         self._cooldown_ms = int(cfg.cooldown_hours * HOUR_MS)
         self.hold_limit = -1  # bars allowed in the current trade by the half-life time stop
+        # Manual exit plan for the open position (dashboard); None = the configured rule.
+        self.z_exit_override: float | None = None
+        self.stop_pct_override: float | None = None
 
     # ------------------------------------------------------------------ fit
     def wants_refit(self, bar_index: int) -> bool:
@@ -135,9 +139,14 @@ class PairStrategy:
 
     def stop_level(self) -> float:
         """Equity at or below which the open position is stopped out."""
-        if self.side == FLAT or self.cfg.stop_loss_pct <= 0:
+        pct = self.cfg.stop_loss_pct if self.stop_pct_override is None else self.stop_pct_override
+        if self.side == FLAT or pct <= 0:
             return -math.inf
-        return (1.0 - self.cfg.stop_loss_pct) * self.entry_equity
+        return (1.0 - pct) * self.entry_equity
+
+    def exit_z(self) -> float:
+        """Exit band of the open position: the manual exit plan, else the pair's z_exit."""
+        return self.params.z_exit if self.z_exit_override is None else self.z_exit_override
 
     def catastrophe_level(self) -> float:
         """Equity at which the intrabar emergency stop fires (off unless configured)."""
@@ -159,7 +168,7 @@ class PairStrategy:
             z_stop = self.params.z_entry + off
             if (self.side == LONG and z_sell <= -z_stop) or (self.side == SHORT and z_buy >= z_stop):
                 return "stop_z"
-        z_exit = self.params.z_exit
+        z_exit = self.exit_z()
         if self.side == LONG:
             z = z_sell
             hit = self.prev_exit_z < -z_exit and z >= -z_exit
@@ -251,6 +260,7 @@ class PairStrategy:
         self.entry_ts = -1
         self.prev_exit_z = math.nan
         self.hold_limit = -1
+        self.z_exit_override = self.stop_pct_override = None
         if reason in STOP_REASONS:
             self.cooldown_until = ts + self._cooldown_ms
         if reason == "liquidation":
@@ -279,6 +289,8 @@ class PairStrategy:
             "peak_equity": self.peak_equity,
             "hold_limit": self.hold_limit,
             "initial_equity": self.initial_equity,
+            "z_exit_override": self.z_exit_override,
+            "stop_pct_override": self.stop_pct_override,
         }
 
     def restore(self, snap: dict) -> None:
@@ -304,3 +316,6 @@ class PairStrategy:
         self.peak_equity = float(snap.get("peak_equity", self.peak_equity))
         self.initial_equity = float(snap.get("initial_equity", self.initial_equity))
         self.hold_limit = int(snap.get("hold_limit", -1))
+        zo, so = snap.get("z_exit_override"), snap.get("stop_pct_override")
+        self.z_exit_override = None if zo is None else float(zo)
+        self.stop_pct_override = None if so is None else float(so)

@@ -29,7 +29,8 @@ def live() -> None:
         return
     calm = ex[~ex["urgent"]]
     c = W.kpis("exec")
-    c.metric("Executions", f"{len(ex)}", f"{int(ex['urgent'].sum())} urgent (stops)", delta_color="off", delta_arrow="off")
+    c.metric("Executions", f"{len(ex)}", f"{int(ex['urgent'].sum())} urgent (stops, market orders)", delta_color="off",
+             delta_arrow="off")
     c.metric("Maker share", f"{calm['maker %'].mean():.0f}%" if len(calm) else "—",
                 help="share of non-urgent notional filled as maker (post-only)")
     c.metric("Avg cost", f"{ex['cost bps'].mean():.1f} bps", help="fees + price vs mid; all-taker is ~10-15 bps")
@@ -50,7 +51,7 @@ def live() -> None:
     st.dataframe(ex.iloc[::-1].style.format({"maker %": "{:.0f}%", "cost bps": "{:.1f}", "fee bps": "{:.1f}",
                                              "seconds": "{:.0f}"}),
                  width="stretch", hide_index=True, placeholder="", key="ex_all",
-                 column_config={"time": st.column_config.DatetimeColumn("time (UTC)", format="MM-DD HH:mm:ss")})
+                 column_config={"time": st.column_config.DatetimeColumn("time", format="DD/MM HH:mm:ss")})
 
 
 live()

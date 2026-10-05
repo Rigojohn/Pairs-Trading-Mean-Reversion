@@ -49,8 +49,8 @@ class RiskManager:
         total_equity: float,
         quotes_ok: bool,
     ) -> Decision:
-        if order.kind == "close":
-            return Decision(True)  # reducing risk is always allowed
+        if order.kind != "open":
+            return Decision(True)  # closing or reducing risk is always allowed
         if self.kill_switch:
             return Decision(False, "kill switch engaged")
         if open_pairs >= self.cfg.max_open_pairs:

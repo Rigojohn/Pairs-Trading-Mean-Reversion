@@ -1,15 +1,19 @@
 """Real-time dashboard of the bot (Streamlit). Start: python -m cryptopairs dashboard
 
 A multi-page web app on top of the bot's state database (read-only):
-  Overview        KPIs (equity, daily PnL, Sharpe, drawdown, Z), equity curve, open book, signal monitor, exposure
-  Pair monitor    normalised prices, Z with thresholds and BUY/SELL/CLOSE markers, model, legs, controls
-  Backtest lab    the sidebar what-if vs the calibrated parameters on real data up to the last hour
+  Overview        NAV, returns by period, risk ratios, book exposure / beta / funding carry, blotter with
+                  quick actions, PnL attribution, daily PnL calendar, signal radar, PnL correlation
+  Pair desk       TradingView charts, live Binance order books and tape, order ticket (open / close /
+                  scale out / exit plan), position card, pair profile, parameters
+  Backtest lab    the what-if parameters vs the calibrated ones on real data up to the last hour
   Executions      maker share, cost and time per execution
   Risk & controls global switches, per-pair controls, parameter overrides, command history
   System logs     live tail of the bot's log with filters, and the event journal
 
-The sidebar picks the bot, the focus pair, the pairs in view, the history window, the refresh
-rate and the what-if parameters ("Recalculate" applies them to the charts and the lab).
+The sidebar picks the bot and holds the live watchlist (a click makes a pair the focus of every
+page) and a View menu (focus pair, history window, refresh rate, pairs in view). The what-if
+parameters sit on the Pair desk and in the Backtest lab. Times are shown in Athens time
+(CRYPTOPAIRS_TZ to change it).
 The dashboard never trades: buttons only queue a command that the bot validates and runs
 within a couple of seconds (runtime/commands.py). Paths can be set with the CRYPTOPAIRS_*
 environment variables or the arguments below.
@@ -30,8 +34,10 @@ import streamlit as st
 # Modules the pages use, in dependency order. Streamlit re-reads the page files when they change
 # (runOnSave), but keeps already-imported modules; reloading them as well keeps both in step,
 # so a code update never leaves a running dashboard half old, half new.
-CODE = ["cryptopairs.runtime.store", "cryptopairs.ui.theme", "cryptopairs.ui.data", "cryptopairs.ui.lab",
-        "cryptopairs.ui.live", "cryptopairs.ui.charts", "cryptopairs.ui.widgets"]
+CODE = ["cryptopairs.runtime.store", "cryptopairs.research.pairstats", "cryptopairs.ui.theme", "cryptopairs.ui.data",
+        "cryptopairs.ui.market", "cryptopairs.ui.lab", "cryptopairs.ui.live", "cryptopairs.ui.tv",
+        "cryptopairs.ui.fund", "cryptopairs.ui.tvcharts", "cryptopairs.ui.ticket", "cryptopairs.ui.charts",
+        "cryptopairs.ui.widgets", "cryptopairs.ui.desk"]
 _reload_lock = threading.Lock()
 
 
@@ -46,7 +52,9 @@ def _reload_updated_code() -> None:
             except OSError:
                 loaded_at = time.time()
         mods = [sys.modules[m] for m in CODE if m in sys.modules]
-        if any(Path(m.__file__).stat().st_mtime > loaded_at for m in mods):
+        js = list((Path(__file__).resolve().parent / "ui" / "js").glob("*.js"))  # read when a component registers
+        if any(Path(m.__file__).stat().st_mtime > loaded_at for m in mods) or any(
+                f.stat().st_mtime > loaded_at for f in js):
             for m in mods:
                 importlib.reload(m)
         pkg._loaded_at = time.time()
@@ -54,13 +62,13 @@ def _reload_updated_code() -> None:
 
 _reload_updated_code()
 
-from cryptopairs.ui import live, theme  # noqa: E402 - after the reload above
+from cryptopairs.ui import live, theme, tv  # noqa: E402 - after the reload above
 from cryptopairs.ui.widgets import sidebar  # noqa: E402
 
 VIEWS = Path(__file__).resolve().parent / "ui" / "views"
 PAGES = [  # (file, title, icon, url)
     ("overview.py", "Overview", ":material/dashboard:", "overview"),
-    ("pair.py", "Pair monitor", ":material/candlestick_chart:", "pair"),
+    ("pair.py", "Pair desk", ":material/candlestick_chart:", "pair"),
     ("backtest.py", "Backtest lab", ":material/science:", "lab"),
     ("executions.py", "Executions", ":material/receipt_long:", "executions"),
     ("controls.py", "Risk & controls", ":material/tune:", "controls"),
@@ -83,6 +91,7 @@ def _args() -> argparse.Namespace:
 @st.cache_resource(show_spinner=False)
 def _static_files() -> bool:
     live.ensure_plotly_js()
+    tv.ensure_static_files()
     return True
 
 

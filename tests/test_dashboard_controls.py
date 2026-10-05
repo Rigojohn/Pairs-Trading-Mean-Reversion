@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cryptopairs.config import AppConfig
 from cryptopairs.core.strategy import FLAT, LONG, PairParams
 from cryptopairs.runtime.commands import CommandProcessor
 from cryptopairs.runtime.risk import RiskManager
@@ -147,7 +148,11 @@ def test_live_rows_and_fit_history(tmp_path):
         hist = eng.fit_rows(rig.bar, history_bars=10)
         store.record_fit_history(hist)
         assert len(hist) == 1 and hist[0]["kf_beta"] == pytest.approx(eng.pairs[0].strat.fit.beta)  # OLS: L bars only
+        n_eq = store.query("SELECT COUNT(*) AS n FROM equity_live")[0]["n"]
         assert store.prune_live(feed.now_ms() + 1) == 1
+        assert store.query("SELECT COUNT(*) AS n FROM equity_live")[0]["n"] == n_eq  # one mark a minute is kept
+        store.prune_live(feed.now_ms() + 1, feed.now_ms() + 1)
+        assert store.query("SELECT COUNT(*) AS n FROM equity_live")[0]["n"] == 0
         store.close()
 
     asyncio.run(go())
@@ -209,6 +214,7 @@ def _app(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYPTOPAIRS_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("CRYPTOPAIRS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("CRYPTOPAIRS_CONFIG", str(tmp_path / "no-config.yaml"))  # defaults of the stored profile
+    monkeypatch.setenv("CRYPTOPAIRS_OFFLINE", "1")  # no Binance / CoinGecko calls from the pages
     at = AppTest.from_file(str(APP), default_timeout=90)
     at.session_state["lab_extend"] = False  # no network in tests
     return at
@@ -226,7 +232,8 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
     assert not at.exception, at.exception
     labels = {m.label for m in at.metric}
     expected = {
-        "overview": {"Bot", "Equity", "Daily PnL", "Open pairs", "Sharpe 7d", "Max DD 7d", "Status"},
+        "overview": {"NAV", "Today", "Since inception", "Sharpe 7d", "Max DD 7d", "Gross exposure", "BTC-equivalent",
+                     "Funding carry", "Open positions", "Hit rate"},
         "pair": {"Position", "Unrealized", "Z now", "β in use"},
         "backtest": {"Sharpe · calibrated", "Total return · calibrated", "Trades · calibrated"},
         "executions": {"Executions", "Maker share"},
@@ -247,12 +254,10 @@ def test_what_if_reaches_the_lab_and_is_applied_through_a_command(tmp_path, monk
     _archive(tmp_path)
     at = _app(tmp_path, monkeypatch).run()
     assert at.session_state["focus"] == "AAA_BBB"
-    at.sidebar.slider(key="wi_ze_AAA_BBB").set_value(3.0)
-    at.sidebar.slider(key="wi_zx_AAA_BBB").set_value(0.5)
-    next(b for b in at.sidebar.button if b.label == "Recalculate").click().run()
-    assert not at.exception, at.exception
-
-    at.switch_page("ui/views/backtest.py").run()
+    at.switch_page("ui/views/backtest.py").run()  # the what-if panel sits in the lab and on the Pair desk
+    at.slider(key="wi_ze_AAA_BBB").set_value(3.0)
+    at.slider(key="wi_zx_AAA_BBB").set_value(0.5)
+    next(b for b in at.button if b.label == "Recalculate").click().run()
     assert not at.exception, at.exception
     assert {"Sharpe · what-if", "Trades · what-if"} <= {m.label for m in at.metric}
 
@@ -276,16 +281,105 @@ def test_pair_button_queues_a_command(tmp_path, monkeypatch):
     store = StateStore(rig.db)
     cmd = store.pending_commands()
     assert [(c["kind"], c["pair_id"]) for c in cmd] == [("pause_pair", "AAA_BBB")]
-    # the close button stays disabled until "confirm close" is ticked
-    assert at.button(key="close_AAA_BBB").disabled
+    # the ticket cannot send anything while the bot is down (its snapshots are years old here)
+    assert at.button(key="tk_send_close_AAA_BBB").disabled
+
+
+def _alive_with_books(rig, monkeypatch):
+    """The bot looks alive (a fresh live snapshot) and Binance answers with a deep book."""
+    from cryptopairs.ui import data as D
+    from cryptopairs.ui import market as M
+
+    store = StateStore(rig.db)
+    store.record_live_equity(D.now_ms(), 100.0, 1)
+    live = store.query("SELECT * FROM pair_live ORDER BY ts DESC LIMIT 1")[0]
+    store.close()
+    books = {sym: {"bids": [[px * 0.9999, 1e9]], "asks": [[px * 1.0001, 1e9]], "ts": 0}
+             for sym, px in (("AAA/USDT:USDT", live["mid_a"]), ("BBB/USDT:USDT", live["mid_b"]))}
+    monkeypatch.setattr(M, "order_books", lambda symbols, limit=50: books)
+
+
+def test_order_ticket_closes_part_of_the_position_and_sets_an_exit_plan(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    rig = _populated(tmp_path)  # a long spread is open
+    _alive_with_books(rig, monkeypatch)
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/pair.py").run()
+    assert not at.exception, at.exception
+    at.segmented_control(key="tk_frac_AAA_BBB").set_value("50%").run()
+    assert {"PnL realized", "Est. cost", "Left open"} <= {m.label for m in at.metric}
+    send = at.button(key="tk_send_close_AAA_BBB")
+    assert send.disabled  # needs the confirmation first
+    at.checkbox(key="tk_close_AAA_BBB_0").check().run()
+    at.button(key="tk_send_close_AAA_BBB").click().run()
+    assert not at.exception, at.exception
+    at.number_input(key="tk_zx_AAA_BBB").set_value(0.5).run()
+    at.button(key="tk_send_exit_AAA_BBB").click().run()
+    cmds = StateStore(rig.db).pending_commands()
+    assert [(c["kind"], json.loads(c["payload"])) for c in cmds] == [
+        ("close_pair", {"fraction": 0.5, "execution": "market"}),
+        ("set_exit_plan", {"z_exit": 0.5, "stop_loss_pct": 0.2})]
+    assert not at.checkbox(key="tk_close_AAA_BBB_1").value  # the confirmation resets after a send
+
+
+def test_order_ticket_opens_a_flat_pair(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    rig = Rig(tmp_path)
+
+    async def go():  # a flat pair with a fit and live marks
+        eng, feed, store = rig.engine([spec(z_entry=50.0)])  # no automatic entry
+        await rig.step(eng, feed, rig.bar)
+        store.record_live(eng.live_rows(feed.now_ms()))
+        store.record_fit_history(eng.fit_rows(rig.bar, history_bars=5))
+        store.close()
+
+    asyncio.run(go())
+    _alive_with_books(rig, monkeypatch)
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/pair.py").run()
+    assert not at.exception, at.exception
+    at.segmented_control(key="tk_side_AAA_BBB").set_value("Short spread").run()
+    at.segmented_control(key="tk_ex_open_AAA_BBB").set_value("Maker-first").run()
+    assert {"Z at entry", "Gross notional", "Est. cost", "Stop / catastrophe"} <= {m.label for m in at.metric}
+    at.checkbox(key="tk_open_AAA_BBB_0").check().run()
+    at.button(key="tk_send_open_AAA_BBB").click().run()
+    assert not at.exception, at.exception
+    cmds = StateStore(rig.db).pending_commands()
+    lev = AppConfig().strategy.leverage
+    assert [(c["kind"], json.loads(c["payload"])) for c in cmds] == [
+        ("open_pair", {"side": -1, "leverage": lev, "execution": "maker"})]
 
 
 def test_heartbeat_marks_a_stale_bot(tmp_path, monkeypatch):
     pytest.importorskip("streamlit")
     _populated(tmp_path)  # snapshots were written with the test's fake clock (years ago)
     at = _app(tmp_path, monkeypatch).run()
-    assert next(m for m in at.metric if m.label == "Bot").value == "DOWN"
     assert any("The bot is not running" in h.proto.body for h in at.get("html"))
+    assert any("BOT DOWN" in h.proto.body for h in at.get("html"))
+
+
+def test_watchlist_puts_open_positions_first_and_a_pick_moves_the_focus(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    from cryptopairs.ui.widgets import watchlist_rows
+
+    rows = pd.DataFrame([
+        {"pair": "F1", "a": "A", "b": "B", "side": 0, "Z now": 1.9, "Z entry": 2.0, "to entry": 0.1, "PnL": 1.0,
+         "unrealized": 0.0, "status": "", "paused": False, "override": False, "exit plan": False},
+        {"pair": "O1", "a": "C", "b": "D", "side": -1, "Z now": 2.5, "Z entry": 2.0, "to entry": np.nan, "PnL": -1.0,
+         "unrealized": -1.5, "status": "", "paused": False, "override": False, "exit plan": True},
+        {"pair": "F2", "a": "E", "b": "F", "side": 0, "Z now": 0.1, "Z entry": 2.0, "to entry": 1.9, "PnL": 0.0,
+         "unrealized": 0.0, "status": "", "paused": True, "override": False, "exit plan": False},
+    ])
+    wl = watchlist_rows(rows, pending={"O1"})
+    assert [r["id"] for r in wl] == ["O1", "F1", "F2"] and wl[0]["busy"] and wl[0]["plan"] and wl[2]["paused"]
+    assert wl[1]["to_entry"] == 0.1 and wl[1]["z"] == 1.9
+
+    _populated(tmp_path)
+    at = _app(tmp_path, monkeypatch)
+    at.session_state["_focus_pick"] = "AAA_BBB"  # what a click in the watchlist leaves for the next run
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["focus"] == "AAA_BBB" and "_focus_pick" not in at.session_state
 
 
 def test_log_reader_keeps_tracebacks_with_their_line(tmp_path):

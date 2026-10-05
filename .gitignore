@@ -15,3 +15,6 @@ exports/
 # Τρίτων, δεν ανεβαίνουν (το legacy/ περιέχει ήδη τον κώδικα του zip)
 ssrn-6188418.pdf
 CryptoPairTrading-main.zip
+
+# Copied from cryptopairs/ui/vendor/ when the dashboard starts
+cryptopairs/static/lightweight-charts.standalone.production.js

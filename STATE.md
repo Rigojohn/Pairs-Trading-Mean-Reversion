@@ -13,7 +13,7 @@
   - paper bot: Kalman filter, εκτέλεση «maker πρώτα», κίνδυνος, βάση SQLite με ανάκτηση μετά από crash;
   - real-time dashboard **πολλών σελίδων** (σκούρο θέμα, what-if sliders, Backtest lab, εφαρμογή παραμέτρων στο bot);
   - Docker για VPS: bot + dashboard, `deploy.sh`, οδηγός `DEPLOY.md` (το build δεν έχει δοκιμαστεί);
-  - **83 tests περνούν**.
+  - **111 tests περνούν**.
 - **Βασικό εύρημα:** με ρεαλιστικά κόστη η στρατηγική έχει **μικρό και ασταθές πλεονέκτημα**. Η καλύτερη εκδοχή (K1 Kalman) έβγαλε **−9,7% στο validation** (Αύγ. 2025 – Φεβ. 2026) και **+27,5% στο test** (Μάρ. – Σεπ. 2026). **Δεν έχει προταθεί live με πραγματικά χρήματα.** Το paper trading είναι η τρέχουσα «αληθινή» δοκιμή.
 - **Τι τρέχει τώρα (τοπικά):**
   - paper bot με profile `kalman` (K1), 3 ανοιχτές θέσεις, equity ≈ €1.700;
@@ -24,6 +24,69 @@
 ---
 
 > **2026-10-01 23:54 (ώρα Ελλάδας): το paper bot ΤΡΕΧΕΙ ΣΤΟΝ SERVER**: OVHcloud VPS-1, `152.228.175.62` (`vps-3ce1c275.vps.ovh.net`), Γαλλία, Ubuntu 24.04, Docker 29.8 / Compose v5.5. Η βάση μεταφέρθηκε από το PC: ίδιες 4 θέσεις, νέα συνεδρία `paper_20261001_205409_394c0f` στην ίδια `paper.db`. Κενά: 23:18–23:20 και ~1 λεπτό στις 23:54. **Το τοπικό bot και dashboard είναι ΣΤΑΜΑΤΗΜΕΝΑ. Μην τα ξεκινήσεις τοπικά** (η τοπική `state/paper.db` είναι πλέον παλιό αντίγραφο). SSH: `ssh cryptobot` (χρήστης `ubuntu`, μέλος του group `docker`, sudo χωρίς κωδικό). Η σύνδεση με κωδικό είναι κλειστή (`/etc/ssh/sshd_config.d/00-cryptobot-keys-only.conf`). Τον κωδικό του `ubuntu` τον όρισε ο χρήστης και τον ξέρει μόνο εκείνος. Το `data/` έχει ανέβει (Backtest lab). Dashboard: `ssh -N -L 8502:127.0.0.1:8501 cryptobot` → http://localhost:8502. Ενημερώσεις: `./deploy.sh`.
+
+> **2026-10-02 (~12:30): το dashboard ανοίγει και ως εφαρμογή μέσω Tailscale** (`DEPLOY.md` §12). Λογαριασμός Tailscale του χρήστη, tailnet `tail5610d8.ts.net`. Server: `cryptobot` (100.88.209.86), `tailscale up --hostname=cryptobot --accept-dns=false`, ώστε να μην αλλάξει το DNS του bot. `tailscale serve --bg http://127.0.0.1:8501` → **https://cryptobot.tail5610d8.ts.net**, μόνο μέσα στο tailnet, όχι Funnel. Το docker-compose δεν άλλαξε, και το dashboard μένει στο `127.0.0.1:8501`. Το PC του χρήστη (Linux Mint 22.3, XFCE, μόνο Firefox) είναι στο tailnet ως `rigojohn-ms-7922`. Εφαρμογή «CryptoPairs Desk»: φτιάχτηκε με το Web Apps του Mint (Firefox, απομονωμένο προφίλ), με launcher `~/.local/share/applications/WebApp-CryptoPairsDesk3558.desktop` και αντίγραφο στο `~/Desktop` με checksum εμπιστοσύνης του XFCE. Εικονίδιο: `~/.local/share/ice/icons/cryptopairs.{svg,png}`. Επαληθεύτηκε σε headless Firefox μέσω του tailnet: health `ok`, websocket ΟΚ, live δεδομένα, κανένα σφάλμα. Επόμενα βήματα για τον χρήστη: λάπτοπ Windows (Tailscale + Edge «Install this site as an app») και **Disable key expiry** για τον `cryptobot` στο admin console (αλλιώς λήγει σε 180 μέρες). Για να μπει το Tailscale στο PC χρειάστηκε το νέο κλειδί apt του Spotify (`5384CE82BA52C83A`).
+
+> **2026-10-02 (~14:00): dashboard σε επίπεδο fund, Φάση 1 «Pair desk» ΓΡΑΦΤΗΚΕ, ΔΕΝ ΕΧΕΙ ΓΙΝΕΙ DEPLOY.** Ο server τρέχει ακόμα τον παλιό κώδικα (βάση v3). Για ενεργοποίηση: `./deploy.sh` (ξαναχτίζει το image και κάνει restart **και στα δύο** containers, χωρίς `--fresh`). Οι θέσεις διατηρούνται και η βάση περνά αυτόματα σε **schema v4**. Μετά: ένα δοκιμαστικό χειροκίνητο άνοιγμα και κλείσιμο 50% / 100% σε ένα ζεύγος και έλεγχος του `done` στο Command history. Σχέδιο: `~/.claude/plans/lazy-inventing-crab.md`. Συμφωνήθηκε: Φάση 2 = Overview σε στυλ fund, Φάση 3 = οι υπόλοιπες σελίδες, μία ανά παράδοση. Τι άλλαξε:
+> - **Γραφήματα σε TradingView Lightweight Charts 5.2.1:** vendored στο `ui/vendor/` και αντιγραμμένο στο `static/` στην εκκίνηση (`tv.ensure_static_files`). Όψεις: Spread Z (1m/5m/15m από τα 5 s του bot των τελευταίων 24 h, ή 1h από το `fit_history`), Legs (κεριά Binance με όγκο), Relative, Model. Αρχεία: `ui/tv.py`, `ui/tvcharts.py`, `ui/js/{common,chart,market}.js`.
+> - **Αγορά real time στον browser** (όχι μέσω bot): orderbook 10 επιπέδων ανά σκέλος, tape, mark/index, funding με αντίστροφη μέτρηση, live Z και uPnL.
+> - **Προφίλ ζεύγους:** όνομα και market cap από CoinGecko, sector από Binance, blockchains, OI, funding, tick/lot. Στατιστικά (`research/pairstats.py`: συσχέτιση, β OLS, half-life, Hurst, ADF Engle-Granger), κυλιόμενη συσχέτιση, ιστορικό βαθμονόμησης (`runs/<profile>/test_pairs.csv`, το dashboard έχει πλέον mount `./runs`) έναντι του paper.
+> - **Order ticket** (`ui/ticket.py` preview από το πραγματικό βιβλίο, `ui/desk.py`): Open long/short με leverage ≤ `risk.manual_max_leverage` (null = strategy.leverage) και Market ή Maker-first. Close 25/50/75/100% Market ή Maker. **Exit plan** ανά θέση (exit Z, stop-loss %), ενώ το catastrophe stop μένει σκληρό όριο. Χωρίς βιβλίο στο dashboard η εντολή στέλνεται κανονικά (το bot τιμολογεί με τις δικές του τιμές).
+> - **Bot:**
+>   - νέες εντολές `open_pair` και `set_exit_plan`; το `close_pair` δέχεται πλέον `fraction` και `execution`;
+>   - `engine.open_pair/close_pair/set_exit_plan`; order kind `reduce` (`PairBook.reduce`, `store.commit_reduce`, event `position_reduced`);
+>   - οι maker εντολές εκτελούνται στο παρασκήνιο (`_spawn`) και ακυρώνονται στο shutdown;
+>   - `PairStrategy.z_exit_override/stop_pct_override` (στο snapshot; με `None` δεν αλλάζει τίποτα, άρα strict = paper);
+>   - `trades.entry_reason` (`signal`/`manual`); η μετάβαση v3→v4 είναι idempotent.
+> - **103 tests περνούν.** Επαληθεύτηκε σε headless Firefox πάνω σε read-only αντίγραφο της βάσης του server (θύρα 8599): όλες οι όψεις, βιβλία, tape, ticket, προφίλ, χωρίς σφάλματα.
+
+> **2026-10-02 (~16:30): audit της στρατηγικής (χωρίς αλλαγές κώδικα).** Επεξήγηση για τον χρήστη: `docs/strategy_explained.pdf`.
+> - **Μαθηματικά και κώδικας σωστά:** Z, Kalman (prior, χωρίς lookahead), bid/ask Z, sizing 1/(1+β), φίλτρο κόστους (30 bps round trip, ίδιες μονάδες με το edge), πρόσημο funding. Η λογιστική του server επαληθεύτηκε στο λεπτό του ευρώ (BAND/GTC −23,91 = σκέλη − fees). Οι αλλαγές της Φάσης 1 (Pair desk) αφήνουν τα μαθηματικά αμετάβλητα (overrides = None).
+> - **Bot ≠ backtest:** το bot τρέχει το Kalman στις τελευταίες 8.760 h (`kalman_history`), ενώ το backtest/βαθμονόμηση σε όλο το archive. Το β εξαρτάται από την αρχή (MAGIC/CTSI 0,99 με 1 έτος, 0,56 με 6 μήνες· SFP/SSV 0,57 έναντι 0,42 στο full). Το backtest μπήκε ALICE/T SHORT (+€17), το bot όχι. **Διόρθωση που εκκρεμεί:** το bot να φορτώνει το archive `data/` + REST για τις υπόλοιπες ώρες.
+> - **Το validated K1 ≠ live profile:** τα `runs/experiments_kalman_v2` έτρεξαν με base `hardened` + kalman: χωρίς `max_entry_z` (MeanAbsZEntry 167.752 στο validation = trades σε παγωμένες τιμές) και χωρίς `maker_legs`. Νέες συγκρίσεις πρέπει να τρέχουν με το ακριβές profile `kalman`.
+> - **Υπερπροσαρμογή βαθμονόμησης:** corr(train Sharpe, OOS Sharpe) ανά ζεύγος = **0,05** (validation) / **0,09** (test). In-sample μέση απόδοση ζεύγους **+653%** έναντι −9,7% / +27,5% OOS. OOS διάμεσος ζεύγους −23,1% (validation, 35% θετικά) / +2,5% (test, 53% θετικά): το +27,5% το κάνουν λίγα ζεύγη (HFT/ARB +376%, BAND/OGN +321%).
+> - **Ουρές:** in-sample μέσο κέρδος +11,5%, μέση ζημιά −23,4% (stops 12,7%), άρα breakeven win rate ≈ 67%. In-sample 87%, OOS validation ~65%. Χωρίς τις 10–11/10/2025 το validation K1 θα ήταν +11% (RetExCrash).
+> - **Ουδετερότητα αγοράς ΟΚ:** μέσο |β προς BTC| της θέσης με Kalman β = 0,16 (με β από αποδόσεις θα ήταν 0,53: attenuation). Εξαιρέσεις: SFP/ROSE 0,33, SFP/SSV 0,26 (διαφορετικά β των σκελών). Annual vol θέσης ανά μονάδα notional ~58%.
+> - **Φίλτρο άλματος: ΑΠΟΡΡΙΠΤΕΤΑΙ.** In-sample (validation-stage ζεύγη, 2023-08..2025-07, 3.081 trades) οι είσοδοι μετά από άλμα >6σ ενός σκέλους έχουν μέση απόδοση +10,4% έναντι +5,8% για ήσυχες (<2σ), με λίγο περισσότερα stops (16,6% έναντι 12,4%). Η υπεραντίδραση είναι μέρος του edge. Δεν κοιτάχτηκε OOS.
+> - **Προτεινόμενο πλάνο:** (1) διόρθωση ιστορικού Kalman· (2) walk-forward με πολλά folds αντί για 2 παράθυρα των 7 μηνών· (3) προκαθορισμένες εκδοχές: κοινές παράμετροι για όλα τα ζεύγη, sizing ίσου ρίσκου (∝ 1/vol spread), φίλτρο half-life/ADF στο funnel· (4) το paper συνεχίζει χωρίς αλλαγές. Συγκέντρωση στα live ζεύγη: BAND και OGN σε 4 ζεύγη το καθένα, SFP και CTSI σε 3.
+
+> **2026-10-02 (~17:40): Φάση 2 (Overview σε στυλ fund) + ώρα Αθήνας + νέο sidebar, ΓΡΑΦΤΗΚΑΝ, ΔΕΝ ΕΧΕΙ ΓΙΝΕΙ DEPLOY** (μαζί με τη Φάση 1: ένα `./deploy.sh` τα ανεβάζει όλα).
+> - **Overview** (`ui/views/overview.py`, υπολογισμοί στο `ui/fund.py`):
+>   - 16 KPI: NAV, Today, MTD, από την αρχή, Sharpe/Sortino, vol, Max DD, kill switch, gross/net έκθεση, BTC-equivalent (beta 30 ημερών ανά νόμισμα), funding carry/ημέρα, ανοιχτές θέσεις, hit rate, profit factor, μέση διάρκεια;
+>   - γράφημα NAV TradingView (Intraday 1' / Hourly, baseline στο κεφάλαιο, drawdown);
+>   - πίνακας αποδόσεων ανά περίοδο και waterfall κεφάλαιο → spread → fees → funding → NAV;
+>   - **blotter** με επιλογή γραμμής και κουμπιά: Pair desk / Close 50% / Close 100% / Pause;
+>   - **προειδοποίηση funding** όταν μια θέση πληρώνει ≥ 0,5% του notional ανά ημέρα;
+>   - attribution ανά ζεύγος, ημερολόγιο ημερήσιου PnL, signal radar, συσχέτιση PnL ζευγών.
+> - **Ώρα Αθήνας παντού** (`ui/data.py`: `TZ`, `to_time`, `clock`, `day_start_ms`, και `CRYPTOPAIRS_TZ` για αλλαγή):
+>   - πίνακες, Plotly, άξονες και crosshair του TradingView (Intl, με θερινή ώρα), tape;
+>   - «Today» = από τα μεσάνυχτα Αθήνας, με την ίδια βάση (`fund.value_before`) σε strip, KPI και ημερολόγιο;
+>   - το log του bot γράφεται πλέον πάντα σε UTC (`cli`, `Formatter.converter = gmtime`), και το System logs το δείχνει σε ώρα Αθήνας;
+>   - το `tzdata` μπήκε στα requirements.
+> - **Sidebar:**
+>   - επιλογή bot, μενού «View · pair · refresh» (focus, History, Live update, Pairs in view);
+>   - **live watchlist** (`ui/js/watchlist.js`): ανοιχτές θέσεις πρώτα, μετά τα flat κατά απόσταση από σήμα, και ένα κλικ = focus σε όλες τις σελίδες (`_focus_pick`);
+>   - η φόρμα **what-if** μεταφέρθηκε στο Pair desk (Strategy parameters) και στο Backtest lab (expander).
+> - **111 tests περνούν.** Ελέγχθηκε σε headless Firefox πάνω σε read-only αντίγραφο της βάσης του server (κλικ στη watchlist, ώρες, όλες οι σελίδες χωρίς σφάλματα).
+> - **Εύρημα (17:30):** το YFI/SAND (LONG, short SAND) πληρώνει funding **−1,46% ανά 8 h στο SAND**, δηλαδή ~3,1 USDT/ημέρα, ~1,5% του notional ανά ημέρα, ενώ ήταν ήδη −7,96 σε uPnL. Το GTC είχε −0,89% όταν σταμάτησε το BAND/GTC (−23,91). Η στρατηγική δεν τιμολογεί το funding στις εξόδους (`funding_filter` off). Η απόφαση ανήκει στον χρήστη.
+
+> **2026-10-02 (~17:55): ΣΕ ΛΕΙΤΟΥΡΓΙΑ στον server η Φάση 1 + η Φάση 2.** Το dashboard έπεσε για ~10 λεπτά στις 17:46:
+> - Αιτία: ένα **rewind με επαναφορά κώδικα** (17:44:50) γύρισε πίσω μόνο τα αρχεία που είχαν γραφτεί με Write/Edit και έσβησε το `ui/fund.py`. Τα αρχεία που είχαν αλλάξει με scripts στο Bash (`widgets.py`, `data.py`, `charts.py` κ.ά.) έμειναν στη Φάση 2, που ζητούσε το `fund`. Αυτός ο μισός κώδικας ανέβηκε με το `./deploy.sh` στις 17:46, και όλες οι σελίδες έβγαζαν `ImportError: cannot import name 'fund'`.
+> - Διόρθωση: τα 12 αρχεία επανήλθαν από το `~/.claude/file-history/5e72b61e…/`, snapshot 17:38:32 (τέλος της Φάσης 2). Το αντίγραφο της χαλασμένης κατάστασης είναι στο scratchpad (`before-restore/tree.tgz`). 111 tests περνούν.
+> - Έγινε rebuild **μόνο του dashboard** στις ~17:53. Το bot (image 17:46, ίδιος κώδικας bot) δεν έκανε restart: 4 θέσεις, schema v4. Επαληθεύτηκε μέσω https://cryptobot.tail5610d8.ts.net (Overview, Pair desk, χωρίς σφάλματα).
+
+> **2026-10-02 (~18:30): νέο γράφημα NAV + drawdown στο Overview, ΓΡΑΦΤΗΚΕ, ΔΕΝ ΕΧΕΙ ΓΙΝΕΙ DEPLOY** (ο χρήστης: «δεν μου αρέσει καθόλου το Overview, θέλω καλύτερα το chart equity και max drawdown»).
+> - Στην κορυφή, σε όλο το πλάτος: γραμμή με NAV, αλλαγή διαστήματος, high-water mark, drawdown τώρα / ώρες κάτω από το νερό, max drawdown και ποσοστό ανάκτησης. Από κάτω το γράφημα 1H / 6H / 1D / 1W / 1M / ALL (`fund.RANGES`, ~700 σημεία το καθένα): NAV με baseline στην αρχή του διαστήματος, dotted high-water mark (`role="guide"`, δεν επηρεάζει την κλίμακα), κλεισίματα trades με το PnL τους, και underwater drawdown με το ακριβές max (`fund.range_max_drawdown`). Ακολουθούν οι πίνακες Drawdowns (`fund.drawdown_episodes`), Returns και ο waterfall. Οι 16 κάρτες είναι πλέον πιο κάτω («Risk & book»).
+> - Κενά = το bot δεν έτρεχε (`fund.nav_grid`: ανοχή 90 s για τα live σημεία, 2 h για τις ωριαίες τιμές).
+> - **Bot:** το `equity_live` δεν σβήνεται πια στις 24 h. Μετά τις 24 h αραιώνεται σε 1 σημείο/λεπτό και κρατιέται `runtime.equity_history_days: 400` (`store.prune_live(..., equity_older_than_ms)`). Το `pair_live` μένει στις 24 h. **Χρειάζεται `./deploy.sh` πριν από τις ~20:46 ώρα Αθήνας της 2026-10-02**, αλλιώς χάνεται η πρώτη ώρα του ιστορικού των 5 s.
+> - 113 tests περνούν. Επαληθεύτηκε σε headless Firefox (1H / 6H / 1D / ALL, χωρίς σφάλματα).
+> - Από την οθόνη: το MAGIC/CTSI ήταν −17,7%, **2,2% από το stop-loss** (20%).
+
+> **2026-10-02 (~19:00): το γράφημα NAV δείχνει πλέον σε κάθε timeframe από την αρχή του paper. ΣΕ ΛΕΙΤΟΥΡΓΙΑ** (rebuild μόνο του dashboard· το bot και η διατήρηση του equity ανέβηκαν με το `./deploy.sh` του χρήστη, ~18:34).
+> - Τα κουμπιά είναι timeframes, όπως στο TradingView: `fund.TIMEFRAMES` = 1m / 5m / 15m / 1H / 4H / 1D, δηλαδή πόσο χρόνο καλύπτει κάθε σημείο. Το γράφημα πηγαίνει πάντα από την έναρξη της πρώτης συνεδρίας (01/10 19:50) ως τώρα, και η προεπιλογή είναι το πιο λεπτό timeframe με ≤ 1.500 σημεία (`fund.default_timeframe`). Πάνω από 50.000 σημεία γίνεται αραίωση.
+> - Τα 4H/1D κλείνουν σε ώρες Αθήνας (`nav_grid(offset_ms)`). Το HWM και το drawdown κάθε bar (το χειρότερο σημείο μέσα στο bar) υπολογίζονται από όλα τα στιγμιότυπα, οπότε είναι ίδια σε κάθε timeframe.
+> - Η όψη κρατά όλο το ιστορικό καθώς προστίθενται σημεία (`spec.fit`), μέχρι να κάνει ο χρήστης zoom ή pan. Με διπλό κλικ ξαναδείχνει όλο το ιστορικό.
+> - 114 tests περνούν.
 
 ## 1. Εκκρεμότητες (με σειρά προτεραιότητας)
 
@@ -63,7 +126,7 @@
   - Πλήρες πείραμα validation+test: **~20 λεπτά**.
 - Βασικές βιβλιοθήκες: numpy 2.5.3, pandas 3.0.6, ccxt 4.5.85 (με `ccxt.pro`), PyYAML, streamlit 1.64, plotly 7.1, pytest, statsmodels (μόνο για το τεστ σύγκρισης με τον αρχικό κώδικα).
 - Δίκτυο: η Binance (fapi, data.binance.vision, WebSocket) είναι προσβάσιμη. CoinGecko χωρίς API key (λειτούργησε, 50 από 197 νομίσματα δεν αντιστοιχίστηκαν).
-- Tests: `python -m pytest -q` (~15 δευτερόλεπτα, **83 passed**).
+- Tests: `python -m pytest -q` (~22 δευτερόλεπτα, **111 passed**).
 - Μνήμες του Claude για το project: `~/.claude/projects/-home-rigojohn-Documents-CryptoPairsBot/memory/` (φορτώνονται αυτόματα). Τελευταίο plan: `~/.claude/plans/kalman-fuzzy-ullman.md`.
 
 ---
@@ -287,6 +350,14 @@ Profile `kalman_ts` = K2: το ίδιο, συν χρονικό όριο 3 half-l
     Επαληθεύτηκε στο dashboard του χρήστη (8501) με headless Firefox: 5 σελίδες χωρίς σφάλματα, οι τιμές αλλάζουν, τα γραφήματα μένουν στη θέση τους. Επίσης, το σενάριο restart του server δείχνει κόκκινο badge και μετά επαναφορά.
 14. **Έλεγχος εμφάνισης:** υπάρχει headless Firefox μέσω Marionette (script στο scratchpad, ξεχωριστό προφίλ). Το Streamlit κάνει scroll στο `stMain` και όχι στο document. Μην κάνεις `pkill -f` με μοτίβο που υπάρχει στην ίδια εντολή bash, γιατί σκοτώνει το shell (exit 144).
 15. **Εμφάνιση dashboard:** οι κάρτες KPI είναι CSS grid (4 ανά σειρά, 8 από 1820px πλάτος), με `st.container(horizontal=True, key="kpi_*")`. Οι άξονες Plotly έχουν `automargin`. Το `toolbarMode = "viewer"` κρύβει Deploy και τα αναδυόμενα του Streamlit. Οι πίνακες έχουν `placeholder=""` (όχι «None»). Ο άξονας Z περιλαμβάνει και το live Z.
+17. **Η Binance χώρισε τα WebSocket streams των futures** (εντοπίστηκε 2026-10-02): το `/public` δίνει depth και bookTicker, το `/market` δίνει aggTrade, kline και markPrice. Το παλιό `wss://fstream.binance.com/stream` δίνει **μόνο** depth και bookTicker. Το ccxt.pro του bot δεν επηρεάζεται (943 trades σε 10 s στον έλεγχο), αλλά ο browser ανοίγει δύο συνδέσεις (`ui/js/common.js`).
+18. **Χρόνοι συναλλαγών:** οι αποφάσεις στο ωριαίο κλείσιμο σφραγίζονται με την ώρα **ανοίγματος** του κεριού (`Intent.ts = bar_ts`), ενώ τα stops ανάμεσα στα κεριά και οι χειροκίνητες εντολές έχουν την πραγματική ώρα. Το dashboard κανονικοποιεί με `ui.data.event_ms` (+1 h όταν ο χρόνος πέφτει ακριβώς στην ώρα).
+19. **`st.segmented_control`:** χωρίς `required=True`, ένα δεύτερο κλικ στην ενεργή επιλογή την αποεπιλέγει.
+20. **Lightweight Charts:** ο άξονας χρόνου είναι κατά δείκτη (κάθε μοναδικός χρόνος = ένα «bar»), οπότε κάθε γράφημα χρησιμοποιεί **μία** ανάλυση. Τα markers μπαίνουν σε χρόνο που υπάρχει στη σειρά (`tvcharts._snap`). Τα components v2 του Streamlit καλούν το JS σε κάθε rerun και το cleanup μόνο στο unmount, οπότε η κατάσταση κρατιέται στο `parentElement`.
+21. **Ώρα:** η βάση και το bot δουλεύουν σε UTC, και το dashboard δείχνει Αθήνα μέσω του `ui.data.to_time` (μην ξαναγράψεις `pd.to_datetime(..., unit="ms")` σε σελίδα). Το Lightweight Charts δεν ξέρει ζώνες ώρας: χρησιμοποιούνται formatters με `Intl` (`cpTimeFmt`), όχι μετατόπιση των δεδομένων.
+22. **Fragment στο sidebar:** καλείται μέσα σε `with st.sidebar:`. Ένα κλικ στη watchlist γράφει `_focus_pick` και κάνει `st.rerun()`, και το sidebar το εφαρμόζει στο `focus` **πριν** δημιουργηθεί το selectbox. Ένα widget δεν αλλάζει αφού έχει δημιουργηθεί στην ίδια εκτέλεση.
+23. **Φόρμες με sliders όχι μέσα σε fragment που ανανεώνεται** (what-if): μπορεί να χαθούν οι τιμές που δεν έχουν υποβληθεί. Η φόρμα μένει σε επίπεδο σελίδας και κάνει `st.rerun()` στο Recalculate.
+21. **Rewind και αρχεία:** το rewind του Claude Code επαναφέρει μόνο αρχεία που άλλαξαν με Write/Edit. Οι αλλαγές από scripts στο Bash μένουν, και ο κώδικας γίνεται μισός-μισός. Μετά από rewind, πριν από deploy: `python -m pytest -q`, και να μην υπάρχουν imports σε modules που λείπουν.
 12. **`select_slider`:** αν η τρέχουσα τιμή δεν είναι στις επιλογές, «κουμπώνει» στην πλησιέστερη. Τότε ένα «Recalculate» χωρίς αλλαγή θα άλλαζε την παράμετρο, γι' αυτό η τρέχουσα τιμή μπαίνει πάντα στις επιλογές.
 
 ---
@@ -310,7 +381,7 @@ python -m cryptopairs --profile hardened research --tag <tag> --top 20
 python -m cryptopairs --profile hardened experiments --only V0 K1 K2 --out runs/<φάκελος>
 python -m cryptopairs backtest BANDUSDT NKNUSDT --lookback 4320 --z-entry 1.0 --z-exit 0.0
 
-python -m pytest -q                             # 83 tests
+python -m pytest -q                             # 111 tests
 ```
 
 Επανεκκίνηση του bot χρειάζεται μετά από **κάθε** αλλαγή κώδικα ή ρυθμίσεων (χωρίς `--fresh`, εκτός αν αλλάζει το μοντέλο ή οι θέσεις είναι λάθος). Το dashboard ξαναφορτώνεται μόνο του (`runOnSave`).

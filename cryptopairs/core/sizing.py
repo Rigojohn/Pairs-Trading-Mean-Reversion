@@ -48,7 +48,7 @@ class LotRules:
     min_notional: float = 0.0
 
 
-def _floor_to_step(qty: float, step: float) -> float:
+def floor_to_step(qty: float, step: float) -> float:
     if step <= 0:
         return qty
     # Round to the step grid, guarding against float noise such as 2.9999999.
@@ -71,8 +71,8 @@ def round_to_lots(
     rounding moves the notional ratio more than ``max_hedge_error`` (relative)
     away from 1 : beta.
     """
-    ra = _floor_to_step(q_a, rules_a.step)
-    rb = _floor_to_step(q_b, rules_b.step)
+    ra = floor_to_step(q_a, rules_a.step)
+    rb = floor_to_step(q_b, rules_b.step)
     for qty, px, rules, leg in ((ra, price_a, rules_a, "A"), (rb, price_b, rules_b, "B")):
         if qty <= 0 or qty < rules.min_qty:
             raise SizingError(f"leg {leg} quantity {qty} below minimum {rules.min_qty}")

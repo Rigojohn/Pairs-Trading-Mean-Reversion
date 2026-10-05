@@ -20,6 +20,7 @@ from cryptopairs.core.signals import estimate_fits
 from cryptopairs.core.strategy import PairParams
 from cryptopairs.research.backtest import BacktestResult, run_backtest
 from cryptopairs.research.data import DataStore, PairData, make_pair_data
+from cryptopairs.ui import data as D
 
 HOUR = 3_600_000
 DAY = 24 * HOUR
@@ -198,7 +199,7 @@ def z_path(data: PairData, fits, res: BacktestResult) -> tuple[pd.Series, np.nda
         m = (res.ts >= t["entry_ts"]) & (res.ts <= t.get("exit_ts", res.ts[-1]))
         if t.get("sigma"):
             z[m] = (la[m] - t["alpha"] - t["beta"] * lb[m]) / t["sigma"]
-    return pd.Series(pd.to_datetime(res.ts, unit="ms")), z
+    return D.to_time(res.ts), z
 
 
 def surface(data: PairData, fits, cfg: AppConfig, w: WhatIf, start: int, end: int) -> pd.DataFrame:
@@ -232,8 +233,8 @@ def trades_frame(res: BacktestResult) -> pd.DataFrame:
             t[col] = np.nan
     return pd.DataFrame({
         "side": t["side"].map({1: "LONG", -1: "SHORT"}),
-        "entry (UTC)": pd.to_datetime(t["entry_ts"], unit="ms"),
-        "exit (UTC)": pd.to_datetime(t["exit_ts"], unit="ms"),
+        "entry": D.to_time(t["entry_ts"]),
+        "exit": D.to_time(t["exit_ts"]),
         "hours": (t["exit_ts"] - t["entry_ts"]) / HOUR,
         "Z entry": t["z_entry"], "beta": t["beta"], "reason": t["reason"].fillna("open"),
         "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": t["fees"], "funding": t["funding"],

@@ -1,4 +1,4 @@
-"""Backtest lab: the sidebar what-if vs the calibrated parameters, on real data up to the last hour."""
+"""Backtest lab: the what-if parameters vs the calibrated parameters, on real data up to the last hour."""
 
 from dataclasses import astuple
 from pathlib import Path
@@ -9,6 +9,7 @@ import streamlit as st
 
 from cryptopairs.config import AppConfig, load_config
 from cryptopairs.ui import charts as C
+from cryptopairs.ui import data as D
 from cryptopairs.ui import lab as L
 from cryptopairs.ui import widgets as W
 from cryptopairs.ui.theme import AMBER, GREEN, MUTED, RED, TEXT, heading, page_title, pill
@@ -33,6 +34,9 @@ except Exception as exc:
     st.error(f"Could not load the config for profile {ctx.brief.get('profile')!r}: {exc}")
     st.stop()
 
+with st.expander("What-if parameters · shared with the Pair desk", expanded=True, icon=":material/tune:"):
+    W.what_if_panel(ctx, pid, columns=3)
+
 top = st.columns([2.2, 2.2, 1.4, 1.6])
 extend = top[2].toggle("Up to the last hour", value=True, key="lab_extend",
                       help="add the bars after the local archive from Binance")
@@ -44,22 +48,22 @@ if info["error"] and len(data) == 0:
 presets = L.periods(cfg, data, ctx.brief.get("first_start"))
 choice = top[0].selectbox("Period", [*presets, "Custom range"], index=0, key="lab_period")
 if choice == "Custom range":
-    lo, hi = pd.to_datetime(data.ts[0], unit="ms").date(), pd.to_datetime(data.ts[-1], unit="ms").date()
-    rng = top[1].date_input("Range (UTC)", (max(lo, hi - pd.Timedelta(days=180)), hi), min_value=lo, max_value=hi,
+    lo, hi = D.to_time(int(data.ts[0])).date(), D.to_time(int(data.ts[-1])).date()
+    rng = top[1].date_input("Range", (max(lo, hi - pd.Timedelta(days=180)), hi), min_value=lo, max_value=hi,
                             key="lab_range")
     if not isinstance(rng, tuple) or len(rng) != 2:
         st.stop()
-    start = int(pd.Timestamp(rng[0]).value // 1_000_000)
-    end = int((pd.Timestamp(rng[1]) + pd.Timedelta(hours=23)).value // 1_000_000)
+    start = int(pd.Timestamp(rng[0], tz=D.TZ).value // 1_000_000)  # local midnights
+    end = int((pd.Timestamp(rng[1], tz=D.TZ) + pd.Timedelta(hours=23)).value // 1_000_000)
 else:
     start, end = presets[choice]
-    top[1].text_input("Range (UTC)", f"{pd.to_datetime(start, unit='ms'):%Y-%m-%d} → {pd.to_datetime(end, unit='ms'):%Y-%m-%d %H:%M}",
+    top[1].text_input("Range", f"{D.clock(start, '%Y-%m-%d')} → {D.clock(end, '%Y-%m-%d %H:%M')}",
                       disabled=True)
 want_surface = top[3].toggle("Sensitivity map", value=True, help="Sharpe over a z_entry × z_exit grid (~1-3 s)")
 
 in_sample = start < cfg.research.test_start_ms
 badges = [pill("IN-SAMPLE" if in_sample else "OUT-OF-SAMPLE", "bad" if in_sample else "ok"),
-          pill(f"archive to {pd.to_datetime(info['archive_end'], unit='ms'):%Y-%m-%d %H:%M}", "mute")
+          pill(f"archive to {D.clock(info['archive_end'], '%Y-%m-%d %H:%M')}", "mute")
           if info["archive_end"] else "",
           pill(f"+{info['live_bars']} live bars", "info") if info["live_bars"] else "",
           pill(f"profile {cfg.profile}", "mute")]
@@ -113,7 +117,7 @@ with left:
     st.caption(f"Capital {wi.capital:,.0f} USDT · leverage {wi.leverage:g}x · Sharpe annualised with √8760 on hourly "
                "returns · results include every modelled cost.")
 with right:
-    curves = {n: (pd.Series(pd.to_datetime(r.ts, unit="ms")), r.equity) for n, r in results.items()}
+    curves = {n: (D.to_time(r.ts), r.equity) for n, r in results.items()}
     st.plotly_chart(C.bt_equity(curves, colors), width="stretch", theme=None, config={"displaylogo": False})
 
 # ------------------------------------------------------------------ signals
@@ -122,16 +126,16 @@ res = results[focus]
 t, z = L.z_path(data, fits[focus], res)
 i0 = int(np.searchsorted(data.ts, res.ts[0])) if res.ts.size else 0
 sl = slice(i0, i0 + res.ts.size)
-prices = (pd.Series(pd.to_datetime(data.ts[sl], unit="ms")), data.close_a[sl], data.close_b[sl], a, b)
+prices = (D.to_time(data.ts[sl]), data.close_a[sl], data.close_b[sl], a, b)
 mk = []
 for tr in res.trades:
     s = int(tr["side"])
-    mk.append({"time": pd.to_datetime(tr["entry_ts"], unit="ms"), "z": tr["z_entry"], "kind": "long" if s > 0 else "short",
+    mk.append({"time": D.to_time(tr["entry_ts"]), "z": tr["z_entry"], "kind": "long" if s > 0 else "short",
                "text": f"{'BUY' if s > 0 else 'SELL'} spread · Z {tr['z_entry']:+.2f}"})
     if "exit_ts" in tr:
         j = int(np.searchsorted(res.ts, tr["exit_ts"]))
         reason = str(tr.get("reason", ""))
-        mk.append({"time": pd.to_datetime(tr["exit_ts"], unit="ms"), "z": float(z[min(j, len(z) - 1)]) if len(z) else np.nan,
+        mk.append({"time": D.to_time(tr["exit_ts"]), "z": float(z[min(j, len(z) - 1)]) if len(z) else np.nan,
                    "kind": "stop" if reason.startswith(("stop", "liquidation")) else "exit",
                    "text": f"CLOSE ({reason}) · PnL {tr.get('pnl', np.nan):+.2f}"})
 w = runs[focus]

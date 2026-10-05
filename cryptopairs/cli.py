@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +24,7 @@ def _setup_logging(cfg: AppConfig, command: str, verbose: bool, name: str | None
     log_dir = Path(cfg.runtime.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+    logging.Formatter.converter = time.gmtime  # log times are UTC on every machine; the dashboard localises them
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format=fmt,

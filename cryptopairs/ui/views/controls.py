@@ -99,7 +99,7 @@ def live() -> None:
         st.caption("None: every pair trades on its calibrated parameters. Stage a change on the Pair monitor page.")
     else:
         st.dataframe(pd.DataFrame([{
-            "pair": k, "since (UTC)": D.to_time(pd.Series([v.get("ts", 0)]))[0],
+            "pair": k, "since": D.to_time(v.get("ts", 0)),
             "Z entry": f"{v['base']['z_entry']:g} → {v['params']['z_entry']:g}",
             "Z exit": f"{v['base']['z_exit']:g} → {v['params']['z_exit']:g}",
             "lookback": f"{v['base']['lookback']} → {v['params']['lookback']}",
@@ -112,7 +112,7 @@ def live() -> None:
         st.caption("No commands yet.")
     else:
         st.dataframe(pd.DataFrame({
-            "#": cmds["id"], "sent (UTC)": D.to_time(cmds["ts"]), "command": cmds["kind"],
+            "#": cmds["id"], "sent": D.to_time(cmds["ts"]), "command": cmds["kind"],
             "pair": cmds["pair_id"].fillna(""),
             "details": cmds["payload"].fillna("").map(lambda s: "" if s in ("", "{}") else ", ".join(
                 f"{k}={v}" for k, v in json.loads(s).items())),
@@ -123,7 +123,7 @@ def live() -> None:
                                                                  ("color: #f0b429" if v == "pending" else "")),
                  subset=["status"]),
             width="stretch", hide_index=True, placeholder="", key="ct_commands",
-            column_config={"sent (UTC)": st.column_config.DatetimeColumn(format="MM-DD HH:mm:ss")})
+            column_config={"sent": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss")})
 
 
 live()

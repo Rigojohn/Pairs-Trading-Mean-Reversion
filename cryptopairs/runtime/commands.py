@@ -19,7 +19,13 @@ from cryptopairs.runtime.store import StateStore
 
 log = logging.getLogger(__name__)
 
-PAIR_COMMANDS = {"close_pair", "pause_pair", "resume_pair", "set_params", "clear_params"}
+PAIR_COMMANDS = {"close_pair", "pause_pair", "resume_pair", "set_params", "clear_params", "open_pair",
+                 "set_exit_plan"}
+
+
+def _opt_float(p: dict, key: str) -> float | None:
+    v = p.get(key)
+    return None if v is None else float(v)
 
 
 class CommandProcessor:
@@ -49,8 +55,28 @@ class CommandProcessor:
             return False, "expired (sent while the bot was not running)"
         if kind in PAIR_COMMANDS and self.engine.pair(pid) is None:
             return False, f"unknown pair {pid!r}"
-        if kind == "close_pair":
-            return await self.engine.close_pair(pid)
+        if kind == "close_pair":  # no payload = close everything at market (the original button)
+            p = json.loads(cmd.get("payload") or "{}")
+            try:
+                fraction = float(p.get("fraction", 1.0))
+            except (TypeError, ValueError) as exc:
+                return False, f"invalid fraction: {exc}"
+            return await self.engine.close_pair(pid, fraction=fraction, execution=str(p.get("execution", "market")))
+        if kind == "open_pair":
+            p = json.loads(cmd.get("payload") or "{}")
+            try:
+                side = int(p["side"])
+                leverage = _opt_float(p, "leverage")
+            except (KeyError, TypeError, ValueError) as exc:
+                return False, f"invalid order: {exc}"
+            return await self.engine.open_pair(pid, side, leverage, str(p.get("execution", "market")))
+        if kind == "set_exit_plan":
+            p = json.loads(cmd.get("payload") or "{}")
+            try:
+                z_exit, stop = _opt_float(p, "z_exit"), _opt_float(p, "stop_loss_pct")
+            except (TypeError, ValueError) as exc:
+                return False, f"invalid exit plan: {exc}"
+            return await self.engine.set_exit_plan(pid, z_exit, stop)
         if kind == "pause_pair":
             self.engine.set_paused(pid, True)
             return True, "no new entries for this pair (exits and stops still run)"

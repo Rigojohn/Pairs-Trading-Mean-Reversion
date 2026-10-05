@@ -40,10 +40,18 @@ CSS = f"""
 [class*="st-key-kpi"] > [data-testid="stElementContainer"] {{ width: auto !important; min-width: 0 !important; }}
 [class*="st-key-kpi"] > [data-testid="stElementContainer"] > div,
 [class*="st-key-kpi"] [data-testid="stMetric"] {{ height: 100%; }}
-.st-key-kpi_overview, .st-key-kpi_pair {{ grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }}
+.st-key-kpi_overview, .st-key-kpi_pair, .st-key-kpi_fund, .st-key-kpi_book {{
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }}
+@media (min-width: 1400px) {{
+  .st-key-kpi_fund, .st-key-kpi_book {{ grid-template-columns: repeat(8, minmax(0, 1fr)) !important; }}
+  .st-key-kpi_fund [data-testid="stMetric"], .st-key-kpi_book [data-testid="stMetric"] {{ min-height: 92px; }}
+  .st-key-kpi_fund [data-testid="stMetricValue"], .st-key-kpi_book [data-testid="stMetricValue"] {{ font-size: 1.25rem; }}
+}}
 @media (min-width: 1820px) {{
   .st-key-kpi_overview, .st-key-kpi_pair {{ grid-template-columns: repeat(8, minmax(0, 1fr)) !important; }}
 }}
+/* The fund row reads as one band: NAV numbers first, the book's risk second */
+.st-key-kpi_book {{ margin-top: -.15rem; }}
 [data-testid="stMetric"] {{ min-height: 104px; }}
 [data-testid="stMetricLabel"] p {{ white-space: normal; line-height: 1.25; }}
 [data-testid="stMetricDelta"], [data-testid="stMetricDelta"] div {{ white-space: normal !important;
@@ -93,6 +101,29 @@ CSS = f"""
 .params th {{ color: {MUTED}; font-weight: 500; text-align: left; font-size: .78rem; }}
 .params {{ border-collapse: collapse; width: 100%; font-size: .88rem; }}
 .params td.diff {{ color: {AMBER}; font-weight: 600; }}
+/* Overview: the performance line above the NAV chart */
+.perf-head {{ display: grid; grid-template-columns: 1.6fr repeat(5, 1fr); gap: 0; background: {PANEL};
+  border: 1px solid {BORDER}; border-radius: 10px; margin: 2px 0 10px 0; font-variant-numeric: tabular-nums; }}
+.perf-head .ph {{ display: flex; flex-direction: column; gap: 2px; padding: 12px 16px; border-left: 1px solid {BORDER}; }}
+.perf-head .ph:first-child {{ border-left: none; }}
+.perf-head .k {{ color: {MUTED}; font-size: .7rem; letter-spacing: .07em; text-transform: uppercase; }}
+.perf-head b {{ font-size: 1.3rem; font-weight: 650; color: {TEXT}; line-height: 1.25; }}
+.perf-head .ph.main b {{ font-size: 1.9rem; letter-spacing: -.01em; }}
+.perf-head .s {{ color: {MUTED}; font-size: .78rem; }}
+.perf-head .pos {{ color: {GREEN}; }} .perf-head .neg {{ color: {RED}; }}
+@media (max-width: 1300px) {{ .perf-head {{ grid-template-columns: repeat(3, 1fr); }}
+  .perf-head .ph:nth-child(4) {{ border-left: none; }} .perf-head .ph {{ border-top: 1px solid {BORDER}; }}
+  .perf-head .ph:nth-child(-n+3) {{ border-top: none; }} }}
+/* Position card: equity on a scale from the catastrophe stop to above the entry equity */
+.riskbar {{ position: relative; height: 24px; background: {PANEL_2}; border: 1px solid {BORDER}; border-radius: 6px;
+  margin: 12px 0 26px 0; }}
+.rb-fill {{ position: absolute; left: 0; top: 0; bottom: 0; opacity: .28; border-radius: 6px 0 0 6px; }}
+.rb-tick {{ position: absolute; top: -5px; bottom: -5px; border-left: 2px solid; }}
+.rb-tick em {{ position: absolute; top: 100%; left: 0; transform: translateX(-50%); font-size: .68rem; font-style: normal;
+  white-space: nowrap; margin-top: 3px; letter-spacing: .04em; text-transform: uppercase; }}
+.rb-now {{ position: absolute; top: 50%; transform: translate(-50%, -50%); font-size: .74rem; font-weight: 700;
+  background: {BG}; color: {TEXT}; padding: 0 6px; border-radius: 4px; border: 1px solid {BORDER};
+  font-variant-numeric: tabular-nums; z-index: 2; }}
 </style>
 """
 

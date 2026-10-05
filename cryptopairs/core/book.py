@@ -54,6 +54,27 @@ class PairBook:
         self.entry_px_a = self.entry_px_b = 0.0
         return self.cash
 
+    def reduce(self, qty_a: float, qty_b: float, fill_a: float, fill_b: float, fee: float) -> float:
+        """Close part of the position (manual scale-out). Returns the PnL realized.
+
+        ``qty_a`` / ``qty_b`` are the signed quantities traded: against the holdings and no
+        larger than them. The closed part's PnL moves into cash and the rest keeps its entry
+        prices, so equity at the fill prices only changes by the fee.
+        """
+        if not self.in_position:
+            raise RuntimeError("book has no position to reduce")
+        for q, held in ((qty_a, self.qty_a), (qty_b, self.qty_b)):
+            if q != 0.0 and (q * held > 0 or abs(q) > abs(held) * (1 + 1e-9)):
+                raise RuntimeError("a reduction must trade against the holdings and not exceed them")
+        realized = -qty_a * (fill_a - self.entry_px_a) - qty_b * (fill_b - self.entry_px_b)
+        self.cash += realized - fee
+        self.fees_paid += fee
+        self.qty_a = 0.0 if abs(self.qty_a + qty_a) <= abs(self.qty_a) * 1e-9 else self.qty_a + qty_a
+        self.qty_b = 0.0 if abs(self.qty_b + qty_b) <= abs(self.qty_b) * 1e-9 else self.qty_b + qty_b
+        if not self.in_position:
+            self.entry_px_a = self.entry_px_b = 0.0
+        return realized
+
     def apply_funding(self, rate_a: float, px_a: float, rate_b: float, px_b: float) -> float:
         """Settle one funding event. Longs pay a positive rate; shorts receive it.
 

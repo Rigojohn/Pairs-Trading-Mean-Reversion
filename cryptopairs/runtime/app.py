@@ -150,6 +150,7 @@ async def run_app(cfg: AppConfig) -> None:
 
     exchange = getattr(ccxtpro, rt.exchange)({"enableRateLimit": True})
     feed = None
+    engine = None
     tasks: list[asyncio.Task] = []
     try:
         await _load_markets(exchange)
@@ -245,7 +246,8 @@ async def run_app(cfg: AppConfig) -> None:
                     store.record_live_equity(now, engine.total_equity(), engine.open_pairs())
                     store.record_live(engine.live_rows(now))
                     if now - last_prune > 3_600_000:
-                        store.prune_live(now - int(rt.live_retention_hours * 3_600_000))
+                        store.prune_live(now - int(rt.live_retention_hours * 3_600_000),
+                                         now - int(rt.equity_history_days * 86_400_000))
                         last_prune = now
                 except Exception:
                     log.exception("live snapshot failed")
@@ -279,6 +281,8 @@ async def run_app(cfg: AppConfig) -> None:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if engine is not None:  # manual orders still being worked (paper: nothing real to undo)
+            await engine.cancel_background()
         if feed is not None:
             await feed.stop()
         await exchange.close()

@@ -211,6 +211,8 @@ class RiskConfig:
     continuous_stop: bool = False
     stop_check_seconds: float = 5.0
     require_quotes_for_entry: bool = True
+    # Highest leverage a manual entry from the dashboard may use; None = strategy.leverage.
+    manual_max_leverage: float | None = None
 
 
 @dataclass
@@ -239,6 +241,9 @@ class RuntimeConfig:
     # Live snapshot (equity and every pair's spread, Z and PnL at live prices) for the dashboard.
     live_snapshot_seconds: float = 5.0
     live_retention_hours: float = 24.0
+    # Total equity marks (the dashboard's NAV curve): one per minute after live_retention_hours,
+    # kept this many days.
+    equity_history_days: float = 400.0
     # Dashboard buttons: how often the bot checks for commands, and how old one may be.
     command_poll_seconds: float = 2.0
     command_max_age_seconds: float = 120.0

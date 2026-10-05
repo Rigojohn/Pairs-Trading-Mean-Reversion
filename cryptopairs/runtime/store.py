@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 import time
 import uuid
@@ -32,18 +33,20 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # v1 -> v2: pair_state.kalman_delta (Kalman-filter pairs).
 # v2 -> v3: pair_live, fit_history and commands tables (created by the DDL below).
+# v3 -> v4: trades.entry_reason ("signal" or "manual": opened from the dashboard).
 # Applied in place on open, so the bot restarts on an existing database without --fresh.
-MIGRATIONS = {2: ["ALTER TABLE pair_state ADD COLUMN kalman_delta REAL"], 3: []}
+MIGRATIONS = {2: ["ALTER TABLE pair_state ADD COLUMN kalman_delta REAL"], 3: [],
+              4: ["ALTER TABLE trades ADD COLUMN entry_reason TEXT"]}
 
 LIVE_COLUMNS = ("ts", "pair_id", "side", "equity", "unrealized", "z_buy", "z_sell", "spread_u",
                 "alpha", "beta", "sigma", "mid_a", "mid_b", "hs_bps_a", "hs_bps_b")
 FIT_COLUMNS = ("bar_ts", "pair_id", "kf_alpha", "kf_beta", "kf_sigma", "used_alpha", "used_beta",
                "used_sigma", "spread_u", "z", "log_a", "log_b")
 COMMAND_KINDS = ("close_pair", "pause_pair", "resume_pair", "pause_entries", "resume_entries",
-                 "reset_kill_switch", "flatten_all", "set_params", "clear_params")
+                 "reset_kill_switch", "flatten_all", "set_params", "clear_params", "open_pair", "set_exit_plan")
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -83,7 +86,7 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_ts INTEGER NOT NULL, exit_ts INTEGER, reason TEXT,
     z_entry REAL, alpha REAL, beta REAL, sigma REAL, expected_ret REAL,
     qty_a REAL, qty_b REAL, entry_px_a REAL, entry_px_b REAL, exit_px_a REAL, exit_px_b REAL,
-    equity_before REAL, equity_after REAL, pnl REAL, fees REAL, funding REAL
+    equity_before REAL, equity_after REAL, pnl REAL, fees REAL, funding REAL, entry_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS trades_pair ON trades(pair_id, entry_ts);
 CREATE TABLE IF NOT EXISTS equity (
@@ -127,7 +130,7 @@ CREATE INDEX IF NOT EXISTS commands_status ON commands(status);
 TRADE_COLUMNS = (
     "pair_id", "session_id", "side", "entry_ts", "exit_ts", "reason", "z_entry", "alpha", "beta",
     "sigma", "expected_ret", "qty_a", "qty_b", "entry_px_a", "entry_px_b", "exit_px_a", "exit_px_b",
-    "equity_before", "equity_after", "pnl", "fees", "funding",
+    "equity_before", "equity_after", "pnl", "fees", "funding", "entry_reason",
 )
 
 
@@ -197,9 +200,16 @@ class StateStore:
                     raise RuntimeError(f"{self.path}: schema v{version} is newer than this code (v{SCHEMA_VERSION})")
                 for v in range(version + 1, SCHEMA_VERSION + 1):
                     for stmt in MIGRATIONS.get(v, []):
-                        self.conn.execute(stmt)
+                        if not self._column_exists(stmt):  # a table the DDL just created has it already
+                            self.conn.execute(stmt)
                 self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
         self.session_id: str | None = None
+
+    def _column_exists(self, stmt: str) -> bool:
+        m = re.match(r"\s*ALTER TABLE (\w+) ADD COLUMN (\w+)", stmt, re.I)
+        if not m:
+            return False
+        return any(r["name"] == m.group(2) for r in self.conn.execute(f"PRAGMA table_info({m.group(1)})"))
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -277,10 +287,19 @@ class StateStore:
                 [tuple(_finite(r.get(k)) if k != "pair_id" else r[k] for k in FIT_COLUMNS) for r in rows],
             )
 
-    def prune_live(self, older_than_ms: int) -> int:
+    def prune_live(self, older_than_ms: int, equity_older_than_ms: int | None = None) -> int:
+        """Delete per-pair live snapshots before ``older_than_ms``. Returns how many.
+
+        Total equity is one small row per mark and is the NAV curve of the dashboard, so it is
+        kept longer: before ``older_than_ms`` it is thinned to the last mark of each minute, and
+        only marks before ``equity_older_than_ms`` are deleted.
+        """
         with self.tx() as c:
             n = c.execute("DELETE FROM pair_live WHERE ts < ?", (older_than_ms,)).rowcount
-            c.execute("DELETE FROM equity_live WHERE ts < ?", (older_than_ms,))
+            c.execute("DELETE FROM equity_live WHERE ts < ? AND ts NOT IN "
+                      "(SELECT MAX(ts) FROM equity_live WHERE ts < ? GROUP BY ts / 60000)", (older_than_ms, older_than_ms))
+            if equity_older_than_ms is not None:
+                c.execute("DELETE FROM equity_live WHERE ts < ?", (equity_older_than_ms,))
         return n
 
     # ------------------------------------------------------------ commands
@@ -378,6 +397,16 @@ class StateStore:
                     (trade["exit_ts"], trade["reason"], trade["exit_px_a"], trade["exit_px_b"],
                      trade["equity_after"], trade["pnl"], trade["fees"], trade.get("funding", 0.0), trade["id"]),
                 )
+            self._upsert_pair(c, pr)
+
+    def commit_reduce(self, order_id: int, report, pr) -> None:
+        """Fills of a partial close + the open trade's fees + pair state, atomically."""
+        with self.tx() as c:
+            self._fills(c, order_id, report)
+            trade = pr.trade or {}
+            if trade.get("id") is not None:
+                c.execute("UPDATE trades SET fees=?, funding=? WHERE id=?",
+                          (trade.get("fees") or 0.0, trade.get("funding") or 0.0, trade["id"]))
             self._upsert_pair(c, pr)
 
     # ------------------------------------------------------- equity, events

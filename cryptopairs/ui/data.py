@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -22,14 +24,49 @@ SIDE = {1: "LONG", -1: "SHORT", 0: "-"}
 RAW_RECENT = 2 * HOUR  # live snapshots newer than this are kept at full resolution ...
 THIN_BUCKET = 60_000  # ... older ones are thinned to the last one per minute (light charts)
 HOURS_PER_YEAR = 24 * 365
+# The dashboard shows wall-clock time in this zone (DST included); the bot and its database use UTC.
+TZ_NAME = os.environ.get("CRYPTOPAIRS_TZ", "Europe/Athens")
+TZ = ZoneInfo(TZ_NAME)
+TZ_LABEL = "Athens" if TZ_NAME == "Europe/Athens" else TZ_NAME.split("/")[-1].replace("_", " ")
+
+
+def event_ms(ts) -> int:
+    """When a trade event really happened. Decisions at an hourly close are stamped with the
+    open time of that bar (exactly on the hour); stops between bars and manual orders carry
+    their real time."""
+    ts = int(ts)
+    return ts + HOUR if ts % HOUR == 0 else ts
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def to_time(ms) -> pd.Series:
-    return pd.to_datetime(ms, unit="ms")
+def to_time(ms):
+    """Epoch milliseconds -> naive wall-clock time in the dashboard's zone (a Series stays a Series)."""
+    if isinstance(ms, pd.Series):
+        return pd.to_datetime(ms, unit="ms", utc=True).dt.tz_convert(TZ).dt.tz_localize(None)
+    if np.ndim(ms) == 0:
+        if ms is None or (isinstance(ms, float) and math.isnan(ms)):
+            return pd.NaT
+        return pd.Timestamp(int(ms), unit="ms", tz="UTC").tz_convert(TZ).tz_localize(None)
+    return pd.Series(pd.to_datetime(np.asarray(ms), unit="ms", utc=True).tz_convert(TZ).tz_localize(None))
+
+
+def local_now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz=TZ).tz_localize(None)
+
+
+def day_start_ms(ms: int | None = None) -> int:
+    """Epoch ms of the local midnight that starts the day containing ``ms`` (default: now)."""
+    t = pd.Timestamp(now_ms() if ms is None else int(ms), unit="ms", tz="UTC").tz_convert(TZ).normalize()
+    return int(t.value // 1_000_000)
+
+
+def clock(ms, fmt: str = "%H:%M") -> str:
+    """Epoch ms as local wall-clock text, '—' when missing."""
+    t = to_time(ms) if ms is not None else pd.NaT
+    return "—" if pd.isna(t) else t.strftime(fmt)
 
 
 def version(path: Path) -> float:
@@ -69,8 +106,7 @@ def load_core(db_path: str, version: float, since_ms: int) -> dict[str, pd.DataF
         "pairs": q("SELECT * FROM pair_state ORDER BY pair_id"),
         "equity": q("SELECT * FROM equity WHERE bar_ts >= ? ORDER BY bar_ts", (since_ms - HOUR,)),
         "equity_live": thinned(db_path, "equity_live", "1=1", (), since_ms),
-        "day_start": q("SELECT equity FROM equity_live WHERE ts >= ? ORDER BY ts LIMIT 1",
-                       (int(pd.Timestamp.now(tz="UTC").normalize().value // 1_000_000),)),
+        "day_start": q("SELECT equity FROM equity_live WHERE ts >= ? ORDER BY ts LIMIT 1", (day_start_ms(),)),
         "marks": q("SELECT * FROM pair_marks WHERE bar_ts >= ? ORDER BY bar_ts", (since_ms - HOUR,)),
         "last_marks": q("SELECT p.* FROM pair_marks p JOIN (SELECT pair_id, MAX(bar_ts) AS ts FROM pair_marks "
                         "GROUP BY pair_id) m ON p.pair_id = m.pair_id AND p.bar_ts = m.ts"),
@@ -84,12 +120,26 @@ def load_core(db_path: str, version: float, since_ms: int) -> dict[str, pd.DataF
     }
 
 
+@st.cache_data(ttl=5, show_spinner=False, max_entries=4)
+def load_nav(db_path: str, version: float) -> dict[str, pd.DataFrame]:
+    """The whole NAV history for the performance chart: bar-close NAV and the live marks
+    (the last two hours in full, one per minute before that)."""
+    live = thinned(db_path, "equity_live", "1=1", (), 0)
+    return {"hourly": query(db_path, "SELECT bar_ts, equity FROM equity ORDER BY bar_ts"),
+            "live": live[["ts", "equity"]] if not live.empty else pd.DataFrame(columns=["ts", "equity"])}
+
+
 @st.cache_data(ttl=5, show_spinner=False, max_entries=8)
 def load_pair(db_path: str, version: float, pair_id: str, since_ms: int) -> dict[str, pd.DataFrame]:
     q = lambda sql, p=(): query(db_path, sql, p)  # noqa: E731
     return {
         "fit": q("SELECT * FROM fit_history WHERE pair_id=? AND bar_ts >= ? ORDER BY bar_ts", (pair_id, since_ms - HOUR)),
         "live": thinned(db_path, "pair_live", "pair_id=?", (pair_id,), since_ms),
+        # The last day at full detail for the intraday charts (1-5-15 min buckets).
+        "live_day": q("SELECT * FROM pair_live WHERE pair_id=? AND ts >= ? ORDER BY ts", (pair_id, now_ms() - 24 * HOUR)),
+        "pending": q("SELECT * FROM orders WHERE pair_id=? AND status='pending' ORDER BY id", (pair_id,)),
+        "reductions": q("SELECT ts, payload FROM events WHERE pair_id=? AND kind='position_reduced' ORDER BY ts",
+                        (pair_id,)),
     }
 
 
@@ -176,7 +226,7 @@ def performance(d: dict, curve: pd.Series) -> dict:
 def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
     """One row per pair: position, legs, live PnL, Z, distances to exit and stops."""
     strat_cfg = cfg.get("strategy", {}) or {}
-    stop_pct = strat_cfg.get("stop_loss_pct") or 0.0
+    stop_cfg = strat_cfg.get("stop_loss_pct") or 0.0
     cat_pct = strat_cfg.get("catastrophe_stop_pct")
     live = d["live"].set_index("pair_id") if not d["live"].empty else pd.DataFrame()
     marks = d["last_marks"].set_index("pair_id") if not d["last_marks"].empty else pd.DataFrame()
@@ -188,6 +238,9 @@ def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
     rows = []
     for r in d["pairs"].itertuples():
         st_, book = json.loads(r.strategy), json.loads(r.book)
+        # The manual exit plan of an open position (dashboard ticket) replaces the pair's rule.
+        stop_pct = stop_cfg if st_.get("stop_pct_override") is None else float(st_["stop_pct_override"])
+        z_exit = float(r.z_exit) if st_.get("z_exit_override") is None else float(st_["z_exit_override"])
         src = live.loc[r.pair_id] if r.pair_id in live.index else (
             marks.loc[r.pair_id] if r.pair_id in marks.index else None)
         side = int(st_.get("side", 0))
@@ -207,11 +260,14 @@ def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
         delta = None if r.kalman_delta is None or pd.isna(r.kalman_delta) else float(r.kalman_delta)
         row = {
             "pair": r.pair_id, "a": r.symbol_a.split("/")[0], "b": r.symbol_b.split("/")[0],
+            "sym_a": r.symbol_a, "sym_b": r.symbol_b,
             "position": SIDE[side], "side": side, "equity": equity, "capital": float(r.capital),
             "PnL": equity - r.capital, "PnL %": 100 * (equity / r.capital - 1) if r.capital else np.nan,
             "unrealized": equity - float(book["cash"]) if side else 0.0,
             "unrealized %": 100 * (equity - float(book["cash"])) / entry_eq if side and entry_eq else np.nan,
             "Z now": z, "z_buy": z_buy, "z_sell": z_sell, "Z entry": float(r.z_entry), "Z exit": float(r.z_exit),
+            "exit plan": st_.get("z_exit_override") is not None or st_.get("stop_pct_override") is not None,
+            "stop %": stop_pct, "exit Z": z_exit,
             "lookback": int(r.lookback), "kalman_delta": delta,
             "qty A": qa, "qty B": qb, "entry A": book["entry_px_a"] if side else np.nan,
             "entry B": book["entry_px_b"] if side else np.nan, "mark A": mark_a, "mark B": mark_b,
@@ -225,9 +281,11 @@ def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
                 "paused" if r.pair_id in paused else "",
                 "deactivated" if st_.get("deactivated") else "",
                 "cooldown" if (st_.get("cooldown_until") or -1) > now else "",
-                "override" if r.pair_id in overrides else "") if x),
-            "since": to_time(pd.Series([st_["entry_ts"]]))[0] if side and st_.get("entry_ts", -1) > 0 else pd.NaT,
-            "hours": (now - st_["entry_ts"]) / HOUR if side and st_.get("entry_ts", -1) > 0 else np.nan,
+                "override" if r.pair_id in overrides else "",
+                "exit plan" if st_.get("z_exit_override") is not None or st_.get("stop_pct_override") is not None
+                else "") if x),
+            "since": to_time(pd.Series([event_ms(st_["entry_ts"])]))[0] if side and st_.get("entry_ts", -1) > 0 else pd.NaT,
+            "hours": (now - event_ms(st_["entry_ts"])) / HOUR if side and st_.get("entry_ts", -1) > 0 else np.nan,
             "Z at entry": np.nan,
         }
         if side and len(t) and t["exit_ts"].isna().any():
@@ -237,7 +295,7 @@ def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
             row["to exit"] = np.nan
         else:  # long exits when Z rises to -z_exit; short when it falls to +z_exit
             row["to entry"] = np.nan
-            row["to exit"] = (-r.z_exit - z_sell) if side > 0 else (z_buy - r.z_exit)
+            row["to exit"] = (-z_exit - z_sell) if side > 0 else (z_buy - z_exit)
         row["to stop %"] = (100 * (equity - (1 - stop_pct) * entry_eq) / entry_eq
                             if side and entry_eq and stop_pct else np.nan)
         row["to catastrophe %"] = (100 * (equity - (1 - cat_pct) * entry_eq) / entry_eq
@@ -274,10 +332,13 @@ def trade_view(t: pd.DataFrame) -> pd.DataFrame:
     t = t.copy()
     for col in ("exit_ts", "entry_ts", "pnl", "fees", "funding", "z_entry", "beta", "equity_before"):
         t[col] = pd.to_numeric(t[col], errors="coerce")
+    origin = t["entry_reason"].fillna("signal") if "entry_reason" in t else pd.Series("signal", index=t.index)
+    entry = t["entry_ts"].map(lambda x: event_ms(x) if pd.notna(x) else np.nan)
+    exit_ = t["exit_ts"].map(lambda x: event_ms(x) if pd.notna(x) else np.nan)
     return pd.DataFrame({
-        "pair": t["pair_id"], "side": t["side"].map(SIDE),
-        "entry (UTC)": to_time(t["entry_ts"]), "exit (UTC)": to_time(t["exit_ts"]),
-        "hours": ((t["exit_ts"] - t["entry_ts"]) / HOUR).round(1),
+        "pair": t["pair_id"], "side": t["side"].map(SIDE), "origin": origin,
+        "entry": to_time(entry), "exit": to_time(exit_),
+        "hours": ((exit_ - entry) / HOUR).round(1),
         "Z entry": t["z_entry"], "beta": t["beta"], "reason": t["reason"].fillna("open"),
         "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": t["fees"], "funding": t["funding"],
     })
@@ -320,5 +381,7 @@ def read_log(path: str, mtime: float, max_bytes: int = 2_000_000) -> pd.DataFram
         elif rows and line.strip():
             rows[-1][3] += "\n" + line
     df = pd.DataFrame(rows, columns=["time", "level", "source", "message"])
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    # The bot logs in UTC (cli._setup_logging); shown in the dashboard's zone.
+    df["time"] = (pd.to_datetime(df["time"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert(TZ)
+                  .dt.tz_localize(None))
     return df

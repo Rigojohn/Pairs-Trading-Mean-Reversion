@@ -3,3 +3,4 @@ numpy==2.5.3
 pandas==3.0.6
 ccxt==4.5.85
 PyYAML==6.0.3
+tzdata==2026.4  # time zones for the dashboard (Europe/Athens) on slim images

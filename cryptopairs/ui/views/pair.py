@@ -1,140 +1,235 @@
-"""Pair monitor: one pair in depth. Prices, Z with bands and signals, model, position, controls."""
+"""Pair desk: one pair the way a trading desk watches it.
 
-import json
+Top: the live ticker (Z and PnL from Binance in the browser) and the bot's numbers.
+Middle: TradingView charts (spread Z, legs, relative value, model) next to the live order
+books and the trade tape. Then the order ticket (open, close or scale out, exit plan) and the
+position card, the pair's profile (instruments, relationship statistics, track record) and
+the strategy parameters (calibrated / in use / what-if).
+"""
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-from cryptopairs.ui import charts as C
 from cryptopairs.ui import data as D
+from cryptopairs.ui import desk as K
 from cryptopairs.ui import lab as L
 from cryptopairs.ui import live as LIVE
+from cryptopairs.ui import market as M
+from cryptopairs.ui import tv as TV
+from cryptopairs.ui import tvcharts as TC
 from cryptopairs.ui import widgets as W
-from cryptopairs.ui.theme import heading, page_title, pill
+from cryptopairs.ui.theme import AMBER, GREEN, LEG_A, MUTED, RED, VIOLET, heading, page_title, pill
 
 ctx = W.context()
 pid = ctx.focus
 pair = ctx.pair(pid)
 a, b = pair["a"].split("/")[0], pair["b"].split("/")[0]
-page_title(f"{a} / {b}", f"Pair monitor · {pid} · change the pair in the sidebar")
+page_title(f"{a} / {b}", f"Pair desk · {pid} · pick another pair in the watchlist · times {D.TZ_LABEL}")
 
-opts = st.container(horizontal=True, gap="large")
-show_sim = opts.toggle("What-if signals", value=True, help="signals the sidebar thresholds would give on the "
-                          "hourly model Z (no costs, stops or filters)")
-show_live = opts.toggle("Live ticks", value=True, help="15-second snapshots between the hourly bars")
-show_model = opts.toggle("Model diagnostics", value=False, help="spread with bands, β and σ: model now vs in use")
+VIEWS = {"Spread Z": ["1m", "5m", "15m", "1h"], "Legs": ["5m", "15m", "1h", "4h"],
+         "Relative": ["5m", "15m", "1h", "4h"], "Model": ["1h"]}
+CANDLES = {"5m": 576, "15m": 672, "1h": 720, "4h": 540}
+
+bar = st.container(horizontal=True, gap="large", vertical_alignment="bottom")
+view = bar.segmented_control("Chart", list(VIEWS), default="Spread Z", key="pd_view", required=True) or "Spread Z"
+tfs = VIEWS[view]
+tf = bar.segmented_control("Timeframe", tfs, default="1h" if "1h" in tfs else tfs[0], key=f"pd_tf_{view}",
+                           required=True) or ("1h" if "1h" in tfs else tfs[0])
+
+
+def _state(d: dict) -> tuple[K.PairState | None, dict]:
+    p = D.load_pair(str(ctx.db_path), D.version(ctx.db_path), pid, ctx.since_ms)
+    return K.load_state(d, ctx, pid, p["pending"]), p
+
+
+def _reductions(p: dict) -> list[int]:
+    r = p.get("reductions")
+    return [] if r is None or r.empty else [int(x) for x in r["ts"]]
+
+
+def _chart(s: K.PairState, p: dict, trades: pd.DataFrame) -> dict:
+    use, wi = ctx.live_params(pid), ctx.what_if_for(pid)
+    max_z = s.scfg.get("max_entry_z")
+    if view == "Spread Z":
+        return TC.z_spec(p["fit"], p["live_day"], trades, tf, z_entry=use.z_entry, z_exit=use.z_exit,
+                         exit_plan=s.strat.get("z_exit_override"), what_if=(wi.z_entry, wi.z_exit), max_entry_z=max_z,
+                         fit_in_use=s.fit, symbols=(s.id_a, s.id_b), now_ms=D.now_ms(), reductions=_reductions(p))
+    if view == "Model":
+        return TC.model_spec(p["fit"], p["live"])
+    ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
+    if view == "Legs":
+        entry = (float(s.book["entry_px_a"]), float(s.book["entry_px_b"])) if s.side else None
+        return TC.legs_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), (s.digits_a, s.digits_b), tf, trades, entry,
+                            side_a=s.side, reductions=_reductions(p))
+    return TC.relative_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), tf, s.fit, use.z_entry, use.z_exit, trades)
 
 
 @st.fragment(run_every=ctx.refresh or None)
-def live() -> None:
+def desk() -> None:
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
         st.info("This pair is not in the selected bot.")
         return
     cfg = D.session_cfg(d)
-    capital = float(d["pairs"]["capital"].sum())
     rows = D.pair_rows(d, cfg)
-    W.status_strip(d, ctx, D.equity_series(d), rows, capital)
-    row = rows[rows["pair"] == pid].iloc[0]
-    last = d["commands"][d["commands"]["pair_id"] == pid].head(1) if not d["commands"].empty else pd.DataFrame()
-    if len(last) and D.now_ms() - int(last.iloc[0]["ts"]) < 15 * 60_000:  # feedback for a recent button press
-        r = last.iloc[0]
-        st.html(pill(f"{r['kind']} → {r['status']}", {"done": "ok", "rejected": "bad"}.get(r["status"], "warn"))
-                + f'<span style="color:#8b93a5;font-size:.8rem">{r["result"] or "waiting for the bot…"}</span>')
-    pr = d["pairs"][d["pairs"]["pair_id"] == pid].iloc[0]
-    st_ = json.loads(pr["strategy"])
-    p = D.load_pair(str(ctx.db_path), D.version(ctx.db_path), pid, ctx.since_ms)
-    fit, lv = p["fit"], (p["live"] if show_live else p["live"].iloc[0:0])
-    live_last = p["live"].iloc[-1] if not p["live"].empty else None
-    fit_last = fit.iloc[-1] if not fit.empty else None
-
-    info = dict(delta_color="off", delta_arrow="off")  # a caption under the value, not a change
+    W.status_strip(d, ctx, D.equity_series(d), rows, float(d["pairs"]["capital"].sum()))
+    s, p = _state(d)
+    K.feedback(s)
+    TV.market("ticker", key=f"pd_ticker_{pid}", **s.market_data())
+    r = s.row
+    info = dict(delta_color="off", delta_arrow="off")
     g = W.kpis("pair")
-    g.metric("Position", row["position"] if row["side"] else "FLAT", row["status"] or "active", **info)
-    g.metric("Unrealized", f"{row['unrealized']:+,.4f}",
-             f"{row['unrealized %']:+.2f}%" if np.isfinite(row["unrealized %"]) else None,
-             help="USDT, and % of the equity at entry")
-    g.metric("Z now", f"{row['Z now']:+.2f}" if np.isfinite(row["Z now"]) else "—",
-             f"entry ±{row['Z entry']:g} · exit ±{row['Z exit']:g}", **info)
-    if row["side"]:
-        g.metric("To exit (Z)", f"{row['to exit']:+.2f}" if np.isfinite(row["to exit"]) else "—",
-                 f"stop {row['to stop %']:.1f}% away" if np.isfinite(row["to stop %"]) else None, **info)
+    g.metric("Position", K.SIDE_NAME[s.side], r["status"] or "active", **info)
+    g.metric("Unrealized", f"{r['unrealized']:+,.4f}", f"{r['unrealized %']:+.2f}%" if np.isfinite(r["unrealized %"]) else None,
+             help="USDT, and % of the equity at entry (bot's 5-second marks)")
+    g.metric("Z now", f"{r['Z now']:+.2f}" if np.isfinite(r["Z now"]) else "—",
+             f"entry ±{r['Z entry']:g} · exit ±{r['exit Z']:g}", **info, help="the bot's last live mark")
+    if s.side:
+        g.metric("To exit (Z)", f"{r['to exit']:+.2f}" if np.isfinite(r["to exit"]) else "—",
+                 f"stop {r['to stop %']:.1f}% away" if np.isfinite(r["to stop %"]) else None, **info)
     else:
-        g.metric("To entry (Z)", f"{row['to entry']:+.2f}" if np.isfinite(row["to entry"]) else "—",
-                 "signal" if np.isfinite(row["to entry"]) and row["to entry"] <= 0 else "waiting", **info)
-    g.metric("β in use", f"{st_['beta']:.4f}" if st_.get("beta") is not None else "—",
+        g.metric("To entry (Z)", f"{r['to entry']:+.2f}" if np.isfinite(r["to entry"]) else "—",
+                 "signal" if np.isfinite(r["to entry"]) and r["to entry"] <= 0 else "waiting", **info)
+    fit_last = p["fit"].iloc[-1] if not p["fit"].empty else None
+    g.metric("β in use", f"{s.strat['beta']:.4f}" if s.strat.get("beta") is not None else "—",
              f"model {fit_last['kf_beta']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_beta"]) else None,
              **info, help="hedge ratio the position trades on vs the estimate now")
-    g.metric("σ in use", f"{st_['sigma']:.4f}" if st_.get("sigma") else "—",
-             f"model {fit_last['kf_sigma']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_sigma"]) else None,
-             **info)
-    g.metric("Bid-ask (bps)", f"{live_last['hs_bps_a'] * 2:.1f} / {live_last['hs_bps_b'] * 2:.1f}"
-             if live_last is not None and pd.notna(live_last["hs_bps_a"]) else "—", f"{a} / {b}", **info)
-    g.metric("Realized", f"{row['realized']:+,.4f}", f"{int(row['trades'])} trades · {int(row['wins'])} won", **info)
+    g.metric("σ in use", f"{s.strat['sigma']:.4f}" if s.strat.get("sigma") else "—",
+             f"model {fit_last['kf_sigma']:.4f}" if fit_last is not None and pd.notna(fit_last["kf_sigma"]) else None, **info)
+    ia, ib = ((s.insts or {}).get(s.sym_a) or {}), ((s.insts or {}).get(s.sym_b) or {})
+    fr = [x.get("funding_rate") for x in (ia, ib)]
+    g.metric("Funding", " / ".join("—" if x is None else f"{100 * x:+.3f}%" for x in fr), f"{a} / {b} · next settlement",
+             **info, help="current funding rates of the legs (longs pay a positive rate)")
+    g.metric("Realized", f"{r['realized']:+,.4f}", f"{int(r['trades'])} trades · {int(r['wins'])} won", **info)
 
     trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
-    marks, spans = W.trade_markers(trades, fit, p["live"]) if len(trades) else (pd.DataFrame(), [])
-    if fit.empty and lv.empty:
-        st.info("No model history yet for this pair: it appears after the bot's first start with schema v3.")
+    left, right = st.columns([8, 4], gap="medium")
+    with left:
+        spec = _chart(s, p, trades)
+        if not spec["series"]:
+            st.info("No data for this chart yet (Binance unreachable, or no model history before the bot's first bar).")
+        TV.chart(spec, key="pd_chart", rev=f"{pid}-{view}-{tf}-{ctx.window}")
+        st.caption({
+            "Spread Z": "Violet = the Z the strategy trades on (frozen fit while in a position), dotted = the model's Z; "
+                        "cyan = live Z from Binance in this browser. Red dashed = entry, green dotted = exit (amber = the "
+                        "position's exit plan or the what-if below). Shaded = in a position. Lower pane: the spread "
+                        "with its bands. 1–15 min views cover the bot's last 24 h of 5-second marks.",
+            "Legs": "Candles from Binance; the forming candle updates live. Dashed lines = entry prices of the open position.",
+            "Relative": "Both legs rebased to 100 at the left edge. Lower pane: the Z these candles give under the fit "
+                        "in use today (for history, an approximation: the fit changes while the pair is flat).",
+            "Model": "Hedge ratio β and σ of the spread: the Kalman estimate each hour vs the fit the strategy used.",
+        }[view])
+    with right:
+        TV.market("book", key=f"pd_book_{pid}", **s.market_data())
+        TV.market("tape", key=f"pd_tape_{pid}", rows=18, **s.market_data())
+
+
+desk()
+
+
+@st.fragment(run_every=max(ctx.refresh, 3) if ctx.refresh else None)
+def trade() -> None:
+    d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
+    if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
         return
+    s, _ = _state(d)
+    left, right = st.columns([5, 7], gap="large")
+    with left:
+        heading("Order ticket · manual")
+        K.ticket(s, ctx)
+        kv = D.kv_dict(d)
+        paused = pid in set(kv.get("paused_pairs", []) or [])
+        c1, c2 = st.columns([2, 3])
+        if paused:
+            if c1.button("Resume automatic entries", key=f"resume_{pid}", width="stretch"):
+                W.send(ctx.db_path, "resume_pair", pid)
+        elif c1.button("Pause automatic entries", key=f"pause_{pid}", width="stretch"):
+            W.send(ctx.db_path, "pause_pair", pid)
+        c2.caption("A pause stops the bot's own entries for this pair; exits, stops and your manual orders still work.")
+    with right:
+        heading("Position")
+        K.position_card(s)
 
-    wi, use = ctx.what_if_for(pid), ctx.live_params(pid)
-    sim = None
-    if show_sim and not fit.empty:
-        sim = L.simulate_signals(D.to_time(fit["bar_ts"] + D.HOUR), fit["z"].to_numpy(dtype=float), wi.z_entry, wi.z_exit)
-        if len(sim):
-            sim["text"] = sim["kind"].map({"long": "what-if BUY spread", "short": "what-if SELL spread",
-                                           "exit": "what-if CLOSE"}) + sim["z"].map(lambda z: f" · Z {z:+.2f}")
-    heading("Live · last 60 minutes at the bot's 5-second marks")
-    LIVE.chart(C.live_pair_chart(p["live"], a, b, use.z_entry, use.z_exit), key="pm_live", rev=f"live-{pid}")
-    heading("Chart A · normalised price action · both legs rebased to 100")
-    rev = f"{pid}-{ctx.window}"  # a new pair or window resets the zoom; live ticks keep it
-    LIVE.chart(C.prices_chart(fit, lv, a, b, spans), key="pm_prices", rev=rev)
-    heading("Chart B · spread Z-score, thresholds and signals")
-    max_z = (cfg.get("strategy", {}) or {}).get("max_entry_z")
-    LIVE.chart(C.z_chart(fit, lv, spans, marks, (use.z_entry, use.z_exit), (wi.z_entry, wi.z_exit), sim, max_z),
-               key="pm_z", rev=rev)
-    note = ("Filled markers = the bot's trades (▲ buy spread, ▼ sell spread, ● close, ✕ stop); hollow = what-if. "
-            "Red/green = thresholds in use; amber = sidebar what-if. Shaded = in position (fit frozen).")
-    if not wi.same_model(use):
-        note += " The what-if changes the model (δ / lookback): its Z path differs. See the Backtest lab for it."
-    st.caption(note)
-    if show_model:
-        heading("Model diagnostics")
-        LIVE.chart(C.model_chart(fit, lv, use.z_entry, use.z_exit, spans), key="pm_model", rev=rev)
 
-    if row["side"] and live_last is not None:
-        heading("Position legs")
-        book = json.loads(pr["book"])
-        legs = []
-        for sym, qty, entry_px, mark in ((pr["symbol_a"], book["qty_a"], book["entry_px_a"], live_last["mid_a"]),
-                                         (pr["symbol_b"], book["qty_b"], book["entry_px_b"], live_last["mid_b"])):
-            legs.append({"leg": sym, "side": "long" if qty > 0 else "short", "qty": qty, "entry": entry_px,
-                         "mark": mark, "move %": 100 * (mark / entry_px - 1) if entry_px else np.nan,
-                         "notional": abs(qty) * mark, "leg PnL": qty * (mark - entry_px)})
-        lg = pd.DataFrame(legs)
-        st.dataframe(lg.style.format({"qty": "{:,.4f}", "entry": "{:.6g}", "mark": "{:.6g}", "move %": "{:+.2f}%",
-                                      "notional": "{:,.2f}", "leg PnL": "{:+,.4f}"}), width="stretch", hide_index=True, placeholder="",
-                     key="pm_legs")
-        ratio = legs[1]["notional"] / legs[0]["notional"] if legs[0]["notional"] else np.nan
-        st.caption(f"Hedge ratio now {ratio:.3f} vs β at entry {st_.get('beta', np.nan):.3f} · entry equity "
-                   f"{st_.get('entry_equity') or np.nan:,.4f} · funding so far {book.get('funding_paid', 0.0):+.4f}")
+trade()
 
+
+@st.fragment(run_every=60 if ctx.refresh else None)
+def profile() -> None:
+    d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
+    if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
+        return
+    s, _ = _state(d)
+    heading("Pair profile")
+    left, right = st.columns([5, 7], gap="large")
+    with left:
+        st.markdown("**Instruments**")
+        if s.insts is None:
+            st.caption("Binance is not reachable from the dashboard right now.")
+        st.dataframe(K.instruments_table(s, str(ctx.data_dir)), width="stretch", key="pd_inst")
+    with right:
+        st.markdown("**Relationship** · hourly closes")
+        stats, roll, carry = K.relationship(str(ctx.data_dir), pair["a"], pair["b"], not M.offline())
+        if not stats:
+            st.caption(f"No local price history for this pair ({carry.get('error')}).")
+        else:
+            st.dataframe(K.stats_table(stats, s.strat.get("beta")), width="stretch", key="pd_stats")
+            st.caption("Diagnostics only: the strategy has no cointegration filter (as in the paper) and trades the "
+                       "Kalman spread, not this OLS one. Engle-Granger critical values: −3.90 (1%), −3.34 (5%), −3.04 (10%).")
+            if np.isfinite(carry.get("long", np.nan)):
+                st.caption(f"Funding carry over the last 30 days, per 100 USDT gross: long spread "
+                           f"{-100 * carry['long']:+.3f} USDT/day, short spread {-100 * carry['short']:+.3f} USDT/day "
+                           "(+ = received).")
+    if len(roll):
+        t = (roll["ts"] // 1000).to_numpy()
+        spec = {"height": 230, "panes": [1], "series": [
+            TC.series("corr_ret", "Line", TC.line_data(t, roll["corr_ret"]), legend="corr · returns 30d", digits=3,
+                      options={"color": LEG_A, "lineWidth": 2, "priceFormat": TC.price_format(2)}),
+            TC.series("corr_price", "Line", TC.line_data(t, roll["corr_price"]), legend="corr · prices 30d", digits=3,
+                      options={"color": VIOLET, "lineWidth": 1, "priceFormat": TC.price_format(2)},
+                      lines=[TC.price_line(0.5, MUTED, "0.5", TC.DOTTED), TC.price_line(0.9, MUTED, "0.9", TC.DOTTED)]),
+        ]}
+        heading("Rolling 30-day correlation · last year (the paper's funnel asks > 0.9 for prices and > 0.5 for returns)")
+        TV.chart(spec, key="pd_corr", rev=f"corr-{pid}")
+    trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
+    a1, a2 = st.columns([5, 7], gap="large")
+    with a1:
+        heading("Track record")
+        rec = K.track_record(s, trades, K.calibration_record(ctx.brief.get("profile"), pid))
+        if rec.empty:
+            st.caption("No closed trades and no calibration record yet.")
+        else:
+            st.dataframe(rec, width="stretch", key="pd_record")
+    with a2:
+        closed = trades[trades["exit_ts"].notna()] if len(trades) else trades
+        heading("PnL per trade")
+        if len(closed):
+            pnl = closed["pnl"].astype(float)
+            fig = go.Figure(go.Bar(x=D.to_time(closed["exit_ts"].astype("int64")), y=pnl,
+                                   marker_color=[GREEN if v > 0 else RED for v in pnl],
+                                   hovertemplate="%{x|%m-%d %H:%M}<br>%{y:+.4f} USDT<extra></extra>"))
+            fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), hovermode="closest", yaxis_title="USDT")
+            LIVE.chart(fig, key="pd_pnl")
+        else:
+            st.caption("No closed trades yet.")
     if len(trades):
         heading("Trades of this pair")
         tv = D.trade_view(trades.iloc[::-1])
         st.dataframe(tv.style.format({"hours": "{:.1f}", "Z entry": "{:+.2f}", "beta": "{:.4f}", "PnL": "{:+,.4f}",
-                                      "PnL %": "{:+.2f}%", "fees": "{:.4f}", "funding": "{:+.4f}"}, na_rep=""),
-                     width="stretch", hide_index=True, placeholder="", key="pm_trades")
+                                      "PnL %": "{:+.2f}%", "fees": "{:.4f}", "funding": "{:+.4f}"}, na_rep="")
+                     .map(lambda v: f"color: {AMBER}" if v == "manual" else "", subset=["origin"]),
+                     width="stretch", hide_index=True, placeholder="", key="pd_trades")
 
 
-live()
+profile()
+
 
 # ----------------------------------------------------------- parameters
 @st.fragment(run_every=ctx.refresh or None)
 def manage() -> None:
-    """Parameters and controls; refreshed so overrides and pauses show as soon as the bot applies them."""
+    """Parameters for future trades; refreshed so overrides show as soon as the bot applies them."""
     brief = D.load_brief(str(ctx.db_path), D.version(ctx.db_path))
     p = next((x for x in brief["pairs"] if x["id"] == pid), None)
     if p is None:
@@ -142,9 +237,8 @@ def manage() -> None:
     ov = (brief.get("overrides") or {}).get(pid)
     cal, use = L.calibrated(p, ctx.leverage, ov), L.in_use(p, ctx.leverage)
     wi = ctx.what_if.get(pid) or use
-    heading("Parameters · calibrated vs in use vs what-if")
     fmt_d = lambda w: "OLS" if w.kalman_delta is None else f"{w.kalman_delta:.0e}"  # noqa: E731
-    left, right = st.columns([3, 2], gap="large")
+    left, right = st.container(), st.container()
     with left:
         st.html(W.params_table([
             ("Z entry", [f"{w.z_entry:g}" for w in (cal, use, wi)]),
@@ -154,7 +248,7 @@ def manage() -> None:
             ("hedge memory", [L.memory_label(w.kalman_delta, w.lookback) for w in (cal, use, wi)]),
             ("capital (USDT)", [f"{w.capital:,.0f}" for w in (cal, use, wi)]),
             ("leverage", [f"{w.leverage:g}x" for w in (cal, use, wi)]),
-        ], ["Calibrated (pairs file)", "In use (bot)", "What-if (sidebar)"]))
+        ], ["Calibrated (pairs file)", "In use (bot)", "What-if"]))
         if ov:
             pending = (ov["params"]["z_entry"], ov["params"]["z_exit"], ov["params"]["lookback"],
                        ov["params"]["kalman_delta"]) != (use.z_entry, use.z_exit, use.lookback, use.kalman_delta)
@@ -165,8 +259,8 @@ def manage() -> None:
                                                                              use.kalman_delta)
         st.markdown("**Apply to the live bot**")
         if not changed:
-            st.caption("Move the sidebar sliders and press **Recalculate** to stage new thresholds / model settings. "
-                       "Capital and leverage are what-if only.")
+            st.caption("Move the what-if sliders and press **Recalculate** to stage new thresholds / model settings. "
+                       "Capital and leverage are what-if only. For the open position use the ticket's exit plan.")
         else:
             st.caption(("The pair is in a position: the bot keeps its current parameters until it closes, then "
                         "switches. " if p["side"] else
@@ -180,26 +274,11 @@ def manage() -> None:
         if ov and st.button("Revert to calibrated parameters", key=f"revert_{pid}"):
             W.send(ctx.db_path, "clear_params", pid)
 
-    heading("Controls")
-    kv = D.kv_dict({"kv": D.query(str(ctx.db_path), "SELECT * FROM kv")})
-    paused = pid in set(kv.get("paused_pairs", []) or [])
-    k = st.columns([2, 2, 3])
-    with k[0]:
-        if p["side"] != 0:
-            sure = st.checkbox("confirm close", key=f"conf_close_{pid}")
-            if st.button("Close position now (market)", key=f"close_{pid}", disabled=not sure, type="primary"):
-                W.send(ctx.db_path, "close_pair", pid)
-        else:
-            st.caption("No position to close.")
-    with k[1]:
-        if paused:
-            if st.button("Resume entries for this pair", key=f"resume_{pid}"):
-                W.send(ctx.db_path, "resume_pair", pid)
-        elif st.button("Pause entries for this pair", key=f"pause_{pid}"):
-            W.send(ctx.db_path, "pause_pair", pid)
-    with k[2]:
-        st.caption("Exits and stops always keep running, even when entries are paused. The result of each button "
-                   "appears above the charts within ~2 s.")
 
-
-manage()
+heading("Strategy parameters · calibrated vs in use vs what-if (future trades)")
+p_left, p_right = st.columns([5, 4], gap="large")
+with p_left:
+    manage()
+with p_right:
+    st.markdown("**What-if** · the charts above and the Backtest lab follow these")
+    W.what_if_panel(ctx, pid, columns=2)

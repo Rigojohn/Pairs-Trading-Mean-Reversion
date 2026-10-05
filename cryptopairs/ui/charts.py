@@ -7,7 +7,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from cryptopairs.ui.theme import AMBER, BLUE, BORDER, CYAN, FAINT, GREEN, LEG_A, LEG_B, MUTED, RED, TEXT, VIOLET
+from cryptopairs.ui import data as D
+from cryptopairs.ui.theme import AMBER, BLUE, BORDER, GREEN, LEG_A, LEG_B, MUTED, RED, TEXT, VIOLET
 
 HOUR = 3_600_000
 
@@ -21,17 +22,12 @@ MARKERS = {
 
 
 def _t(ms) -> pd.Series:
-    return pd.to_datetime(ms, unit="ms")
+    return D.to_time(ms)
 
 
 def _rgba(hex_color: str, a: float) -> str:
     h = hex_color.lstrip("#")
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
-
-
-def _shade_positions(fig: go.Figure, spans: list[tuple], rows: str | int = "all") -> None:
-    for x0, x1, side in spans:
-        fig.add_vrect(x0=x0, x1=x1, fillcolor=GREEN if side > 0 else RED, opacity=0.06, line_width=0, row=rows, col=1)
 
 
 def _markers(fig: go.Figure, m: pd.DataFrame, row: int | None = None, what_if: bool = False, size: int = 12) -> None:
@@ -52,34 +48,79 @@ def _markers(fig: go.Figure, m: pd.DataFrame, row: int | None = None, what_if: b
 
 
 # ------------------------------------------------------------------ portfolio
-def equity_chart(curve: pd.Series, capital: float, height: int = 380) -> go.Figure:
-    dd = 100 * (curve / curve.cummax() - 1)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.74, 0.26], vertical_spacing=0.04)
-    up = curve.iloc[-1] >= capital
-    fig.add_trace(go.Scatter(x=curve.index, y=curve, name="equity", line=dict(color=GREEN if up else RED, width=2),
-                             hovertemplate="%{y:,.2f}<extra>equity</extra>"), 1, 1)
-    fig.add_hline(y=capital, line=dict(color=MUTED, dash="dot", width=1), row=1, col=1,
-                  annotation_text="capital", annotation_font_color=MUTED, annotation_position="top right")
-    fig.add_trace(go.Scatter(x=dd.index, y=dd, name="drawdown %", fill="tozeroy", fillcolor=_rgba(RED, 0.18),
-                             line=dict(color=RED, width=1), hovertemplate="%{y:.2f}%<extra>drawdown</extra>"), 2, 1)
-    fig.update_yaxes(title_text="USDT", row=1, col=1)
-    fig.update_yaxes(title_text="DD %", row=2, col=1)
-    fig.update_layout(height=height, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+def attribution_waterfall(att: pd.DataFrame, capital: float, height: int = 330) -> go.Figure:
+    """Capital -> spread PnL (closed, open) -> fees -> funding -> NAV."""
+    parts = [("Capital", capital, "absolute"), ("Spread · closed", att["spread closed"].sum(), "relative"),
+             ("Spread · open", att["spread open"].sum(), "relative"), ("Fees", att["fees"].sum(), "relative"),
+             ("Funding", att["funding"].sum(), "relative"), ("NAV", 0.0, "total")]
+    fig = go.Figure(go.Waterfall(
+        x=[p[0] for p in parts], y=[p[1] for p in parts], measure=[p[2] for p in parts],
+        text=[f"{capital:,.2f}"] + [f"{p[1]:+,.2f}" for p in parts[1:-1]] + [f"{capital + att['total'].sum():,.2f}"],
+        textposition="outside", connector=dict(line=dict(color=BORDER, width=1)),
+        increasing=dict(marker=dict(color=GREEN)), decreasing=dict(marker=dict(color=RED)),
+        totals=dict(marker=dict(color=BLUE)), hovertemplate="%{x}: %{y:+,.4f} USDT<extra></extra>"))
+    lo = min(capital, capital + att["total"].sum(), capital + att[["spread closed", "spread open"]].sum().sum())
+    hi = max(capital, capital + att["total"].sum(), capital + att[["spread closed", "spread open"]].sum().sum())
+    pad = max((hi - lo) * 0.6, capital * 0.002)
+    fig.update_yaxes(range=[lo - pad, hi + pad], title_text="USDT")
+    fig.update_layout(height=height, showlegend=False, hovermode="closest", margin=dict(l=10, r=10, t=20, b=10))
     return fig
 
 
-def pnl_by_pair(rows: pd.DataFrame, height: int = 380) -> go.Figure:
-    t = rows.sort_values("PnL")
-    open_pnl = t["unrealized"]
-    realized = t["PnL"] - open_pnl  # closed trades plus fees/funding already paid on the open one
+def attribution_bars(att: pd.DataFrame, height: int = 380) -> go.Figure:
+    """Per pair: spread PnL (closed / open), fees and funding, with the net total marked."""
+    t = att.sort_values("total")
+    labels = t["pair"].str.replace("USDT", "").str.replace("_", " / ")
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=t["pair"], x=realized, orientation="h", name="realized",
-                         marker_color=[_rgba(GREEN if v >= 0 else RED, 0.85) for v in realized]))
-    fig.add_trace(go.Bar(y=t["pair"], x=open_pnl, orientation="h", name="open",
-                         marker_color=[_rgba(GREEN if v >= 0 else RED, 0.35) for v in open_pnl],
-                         marker_line=dict(color=[GREEN if v >= 0 else RED for v in open_pnl], width=1)))
-    fig.update_layout(barmode="relative", height=height, hovermode="y unified",
-                      legend=dict(y=-0.08, yanchor="top", x=0.5, xanchor="center"), margin=dict(l=10, r=10, t=10, b=10))
+    for col, pos, neg, name in (("spread closed", GREEN, RED, "spread · closed"),
+                                ("spread open", _rgba(GREEN, 0.45), _rgba(RED, 0.45), "spread · open"),
+                                ("fees", MUTED, MUTED, "fees"), ("funding", AMBER, AMBER, "funding")):
+        fig.add_trace(go.Bar(y=labels, x=t[col], orientation="h", name=name,
+                             marker_color=[pos if v >= 0 else neg for v in t[col]],
+                             hovertemplate="%{y}: %{x:+,.4f}<extra>" + name + "</extra>"))
+    fig.add_trace(go.Scatter(y=labels, x=t["total"], mode="markers", name="net", hovertemplate="%{y}: net %{x:+,.4f}<extra></extra>",
+                             marker=dict(symbol="diamond", size=9, color=TEXT, line=dict(width=1, color="#0b0e14"))))
+    fig.add_vline(x=0, line=dict(color=BORDER, width=1))
+    fig.update_layout(barmode="relative", height=height, hovermode="closest",
+                      legend=dict(y=1.02, yanchor="bottom", x=0, xanchor="left"), margin=dict(l=10, r=10, t=30, b=10))
+    return fig
+
+
+def pnl_calendar(daily: pd.DataFrame, height: int = 260) -> go.Figure:
+    """Daily PnL as a calendar: one row per week (Monday first), one column per weekday."""
+    df = daily.copy()
+    df["day"] = pd.to_datetime(df["day"])
+    df["week"] = df["day"] - pd.to_timedelta(df["day"].dt.weekday, unit="D")
+    df["dow"] = df["day"].dt.weekday
+    weeks = sorted(df["week"].unique())
+    z = np.full((len(weeks), 7), np.nan)
+    text = np.full((len(weeks), 7), "", dtype=object)
+    for r in df.itertuples():
+        i = weeks.index(r.week)
+        z[i, r.dow] = r.PnL
+        text[i, r.dow] = f"{r.day:%d/%m}<br>{r.PnL:+,.2f}"
+    lim = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
+    lim = lim or 1.0
+    fig = go.Figure(go.Heatmap(
+        z=z, x=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], y=[f"{pd.Timestamp(w):%d %b}" for w in weeks],
+        text=text, texttemplate="%{text}", textfont=dict(size=11), xgap=4, ygap=4, zmid=0, zmin=-lim, zmax=lim,
+        colorscale=[[0, RED], [0.5, "#161c28"], [1, GREEN]], showscale=False,
+        hovertemplate="%{text}<extra></extra>"))
+    fig.update_yaxes(autorange="reversed", showgrid=False)
+    fig.update_xaxes(showgrid=False, side="top")
+    fig.update_layout(height=max(140, min(height, 70 + 46 * len(weeks))), hovermode="closest",
+                      margin=dict(l=10, r=10, t=30, b=10))
+    return fig
+
+
+def corr_heatmap(corr: pd.DataFrame, height: int = 360) -> go.Figure:
+    labels = [c.replace("USDT", "").replace("_", "/") for c in corr.columns]
+    fig = go.Figure(go.Heatmap(z=corr.to_numpy(), x=labels, y=labels, zmin=-1, zmax=1, zmid=0,
+                               colorscale=[[0, RED], [0.5, "#161c28"], [1, GREEN]],
+                               text=np.round(corr.to_numpy(), 2), texttemplate="%{text}", textfont=dict(size=10),
+                               hovertemplate="%{y} vs %{x}: %{z:.2f}<extra></extra>", colorbar=dict(title="ρ")))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(height=height, hovermode="closest", margin=dict(l=10, r=10, t=10, b=10))
     return fig
 
 
@@ -88,100 +129,6 @@ def exposure_chart(ex: pd.DataFrame, height: int = 300) -> go.Figure:
                            hovertemplate="%{x}: %{y:+,.2f} USDT<extra></extra>"))
     fig.update_layout(height=height, yaxis_title="USDT (+long / -short)", hovermode="closest",
                       margin=dict(l=10, r=10, t=10, b=10))
-    return fig
-
-
-# ----------------------------------------------------------------- one pair
-def prices_chart(fit: pd.DataFrame, live: pd.DataFrame, a: str, b: str, spans: list[tuple],
-                 height: int = 330) -> go.Figure:
-    """Chart A: both legs rebased to 100 at the start of the window (hourly closes + live mids)."""
-    fig = go.Figure()
-    if not fit.empty:
-        t = _t(fit["bar_ts"] + HOUR)
-        base_a, base_b = np.exp(fit["log_a"].iloc[0]), np.exp(fit["log_b"].iloc[0])
-        fig.add_trace(go.Scatter(x=t, y=100 * np.exp(fit["log_a"]) / base_a, name=a, line=dict(color=LEG_A, width=1.8)))
-        fig.add_trace(go.Scatter(x=t, y=100 * np.exp(fit["log_b"]) / base_b, name=b, line=dict(color=LEG_B, width=1.8)))
-        if not live.empty:
-            tl = _t(live["ts"])
-            fig.add_trace(go.Scatter(x=tl, y=100 * live["mid_a"] / base_a, name=f"{a} live", mode="lines",
-                                     line=dict(color=LEG_A, width=1, dash="dot"), showlegend=False))
-            fig.add_trace(go.Scatter(x=tl, y=100 * live["mid_b"] / base_b, name=f"{b} live", mode="lines",
-                                     line=dict(color=LEG_B, width=1, dash="dot"), showlegend=False))
-    _shade_positions(fig, spans, rows=None)
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
-    return fig
-
-
-def z_chart(fit: pd.DataFrame, live: pd.DataFrame, spans: list[tuple], trades: pd.DataFrame,
-            in_use: tuple[float, float], what_if: tuple[float, float] | None, sim: pd.DataFrame | None,
-            max_entry_z: float | None, height: int = 420) -> go.Figure:
-    """Chart B: Z-score with entry/exit bands, the bot's trades and the what-if signals."""
-    fig = go.Figure()
-    if not fit.empty:
-        fig.add_trace(go.Scatter(x=_t(fit["bar_ts"] + HOUR), y=fit["z"], name="Z (hourly model)",
-                                 line=dict(color=VIOLET, width=1.6)))
-    if not live.empty:
-        fig.add_trace(go.Scatter(x=_t(live["ts"]), y=(live["z_buy"] + live["z_sell"]) / 2, name="Z live (fit in use)",
-                                 mode="lines", line=dict(color=CYAN, width=1)))
-    ze, zx = in_use
-    for sgn in (1, -1):
-        fig.add_hline(y=sgn * ze, line=dict(color=RED, dash="dash", width=1.2))
-        fig.add_hline(y=sgn * zx, line=dict(color=GREEN, dash="dot", width=1.2))
-    fig.add_annotation(xref="paper", x=1, y=ze, text=f"entry ±{ze:g}", showarrow=False, xanchor="right",
-                       yanchor="bottom", font=dict(color=RED, size=10))
-    fig.add_annotation(xref="paper", x=1, y=-zx, text=f"exit ±{zx:g}", showarrow=False, xanchor="right",
-                       yanchor="top", font=dict(color=GREEN, size=10))
-    if what_if and tuple(what_if) != tuple(in_use):
-        wze, wzx = what_if
-        for sgn in (1, -1):
-            fig.add_hline(y=sgn * wze, line=dict(color=AMBER, dash="longdash", width=1.4))
-            fig.add_hline(y=sgn * wzx, line=dict(color=AMBER, dash="dot", width=1))
-        fig.add_annotation(xref="paper", x=0, y=wze, text=f"what-if entry ±{wze:g} / exit ±{wzx:g}", showarrow=False,
-                           xanchor="left", yanchor="bottom", font=dict(color=AMBER, size=10))
-    if max_entry_z:
-        for sgn in (1, -1):
-            fig.add_hline(y=sgn * max_entry_z, line=dict(color=FAINT, dash="dashdot", width=1))
-    fig.add_hline(y=0, line=dict(color=BORDER, width=1))
-    _shade_positions(fig, spans, rows=None)
-    _markers(fig, trades)
-    _markers(fig, sim, what_if=True)
-    zs = [fit["z"].to_numpy(dtype=float)] if not fit.empty else []
-    if not live.empty:
-        zs.append(((live["z_buy"] + live["z_sell"]) / 2).to_numpy(dtype=float))
-    zall = np.concatenate(zs) if zs else np.empty(0)
-    zmax = float(np.nanmax(np.abs(zall))) if np.isfinite(zall).any() else 3.0
-    lim = max(ze, (what_if or in_use)[0]) * 1.25
-    fig.update_yaxes(range=[-max(zmax, lim) * 1.08, max(zmax, lim) * 1.08], title_text="Z")
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
-    return fig
-
-
-def model_chart(fit: pd.DataFrame, live: pd.DataFrame, z_entry: float, z_exit: float, spans: list[tuple],
-                height: int = 560) -> go.Figure:
-    """Spread with its bands, and the hedge ratio and sigma: model now vs the fit in use."""
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.42, 0.29, 0.29],
-                        subplot_titles=("Spread u = log A - α - β·log B, with entry/exit bands",
-                                        "Hedge ratio β: model now vs in use", "σ of the spread"))
-    if not fit.empty:
-        t = _t(fit["bar_ts"] + HOUR)
-        sig = fit["kf_sigma"]
-        for k, color, dash in ((z_entry, RED, "dash"), (z_exit, GREEN, "dot")):
-            for sgn in (1, -1):
-                fig.add_trace(go.Scatter(x=t, y=sgn * k * sig, mode="lines", line=dict(color=color, dash=dash, width=1),
-                                         hoverinfo="skip", showlegend=False), 1, 1)
-        fig.add_trace(go.Scatter(x=t, y=fit["spread_u"], name="spread (model)", line=dict(color=VIOLET)), 1, 1)
-        fig.add_trace(go.Scatter(x=t, y=fit["kf_beta"], name="β model", line=dict(color=BLUE)), 2, 1)
-        fig.add_trace(go.Scatter(x=t, y=fit["kf_sigma"], name="σ model", line=dict(color=BLUE)), 3, 1)
-    if not live.empty:
-        tl = _t(live["ts"])
-        fig.add_trace(go.Scatter(x=tl, y=live["spread_u"], mode="lines", name="spread live (fit in use)",
-                                 line=dict(color=CYAN, width=1)), 1, 1)
-        fig.add_trace(go.Scatter(x=tl, y=live["beta"], mode="lines", name="β in use", line=dict(color=AMBER, shape="hv")), 2, 1)
-        fig.add_trace(go.Scatter(x=tl, y=live["sigma"], mode="lines", name="σ in use", line=dict(color=AMBER, shape="hv")), 3, 1)
-    fig.add_hline(y=0, line=dict(color=BORDER, width=1), row=1, col=1)
-    _shade_positions(fig, spans)
-    fig.update_annotations(font=dict(color=MUTED, size=11))
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
 
@@ -261,66 +208,3 @@ def _with_gaps(df: pd.DataFrame, max_gap_ms: int = 30_000) -> pd.DataFrame:
         return df
     blank = pd.DataFrame({"ts": df.loc[gaps, "ts"] - 1})  # just before the first mark after the gap
     return pd.concat([df, blank]).sort_values("ts", kind="stable", ignore_index=True)  # other columns: NaN
-
-
-def _last_minutes(minutes: int) -> tuple[pd.Timestamp, pd.Timestamp]:
-    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    return now - pd.Timedelta(minutes=minutes), now + pd.Timedelta(seconds=20)
-
-
-def live_pair_chart(live: pd.DataFrame, a: str, b: str, z_entry: float, z_exit: float, minutes: int = 60,
-                    height: int = 400) -> go.Figure:
-    """The last hour at the bot's 5-second marks: both legs (% move) and the Z the position trades on."""
-    x0, x1 = _last_minutes(minutes)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.45, 0.55], vertical_spacing=0.06)
-    if not live.empty:
-        t = _t(live["ts"])
-        win = _with_gaps(live[t >= x0])
-        if len(win):
-            tw = _t(win["ts"])
-            for col, name, color in (("mid_a", a, LEG_A), ("mid_b", b, LEG_B)):
-                ref = win[col].dropna().iloc[0]
-                fig.add_trace(go.Scatter(x=tw, y=100 * (win[col] / ref - 1), name=f"{name} %", mode="lines",
-                                         line=dict(color=color, width=1.6, shape="hv"),
-                                         hovertemplate="%{y:+.3f}%<extra>" + name + "</extra>"), 1, 1)
-            z = (win["z_buy"] + win["z_sell"]) / 2
-            fig.add_trace(go.Scatter(x=tw, y=z, name="Z live", mode="lines", line=dict(color=CYAN, width=1.8, shape="hv"),
-                                     hovertemplate="Z %{y:+.3f}<extra></extra>"), 2, 1)
-            z_last = float(z.dropna().iloc[-1]) if z.notna().any() else np.nan
-            fig.add_trace(go.Scatter(x=[tw.iloc[-1]], y=[z_last], mode="markers+text", showlegend=False,
-                                     marker=dict(color=CYAN, size=9), text=[f" {z_last:+.2f}"],
-                                     textposition="middle right", textfont=dict(color=CYAN), hoverinfo="skip"), 2, 1)
-    for sgn in (1, -1):
-        fig.add_hline(y=sgn * z_entry, line=dict(color=RED, dash="dash", width=1), row=2, col=1)
-        fig.add_hline(y=sgn * z_exit, line=dict(color=GREEN, dash="dot", width=1), row=2, col=1)
-    fig.add_hline(y=0, line=dict(color=BORDER, width=1), row=1, col=1)
-    fig.update_xaxes(range=[x0, x1])
-    fig.update_yaxes(title_text="move %", row=1, col=1)
-    fig.update_yaxes(title_text="Z", row=2, col=1)
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10))
-    return fig
-
-
-def live_equity_chart(equity_live: pd.DataFrame, capital: float, minutes: int = 60, height: int = 230) -> go.Figure:
-    """Total equity over the last hour at the bot's 5-second marks."""
-    x0, x1 = _last_minutes(minutes)
-    fig = go.Figure()
-    if not equity_live.empty:
-        t = _t(equity_live["ts"])
-        win = _with_gaps(equity_live[t >= x0])
-        if len(win):
-            tw = _t(win["ts"])
-            last = float(win["equity"].dropna().iloc[-1])
-            color = GREEN if last >= capital else RED
-            fig.add_trace(go.Scatter(x=tw, y=win["equity"], mode="lines", name="equity", fill="tozeroy",
-                                     fillcolor=_rgba(color, 0.08), line=dict(color=color, width=1.8, shape="hv"),
-                                     hovertemplate="%{y:,.2f}<extra>equity</extra>"))
-            fig.add_trace(go.Scatter(x=[tw.iloc[-1]], y=[last], mode="markers+text", marker=dict(color=color, size=8),
-                                     text=[f" {last:,.2f}"], textposition="middle right", textfont=dict(color=color),
-                                     hoverinfo="skip", showlegend=False))
-            lo, hi = float(win["equity"].min()), float(win["equity"].max())
-            pad = max((hi - lo) * 0.15, 0.05)
-            fig.update_yaxes(range=[lo - pad, hi + pad])
-    fig.update_xaxes(range=[x0, x1])
-    fig.update_layout(height=height, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
-    return fig

@@ -35,6 +35,7 @@ services:
       - ./logs:/app/logs              # System logs page
       - ./config:/app/config:ro
       - ./data:/app/data:ro           # history for the Backtest lab (empty unless data/ is copied over)
+      - ./runs:/app/runs:ro           # calibration record of each pair (runs/<profile>/test_pairs.csv)
     environment:
       - TZ=UTC
       - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none   # the code does not change under a running server

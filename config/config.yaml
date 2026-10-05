@@ -60,6 +60,7 @@ risk:
   continuous_stop: false           # paper: stops are checked at bar close only
   stop_check_seconds: 5
   require_quotes_for_entry: true
+  manual_max_leverage: null        # cap for manual entries from the dashboard; null = strategy.leverage
 
 runtime:
   mode: paper                      # live arrives in Phase 3
@@ -76,7 +77,8 @@ runtime:
   maker_poll_seconds: 2
   log_dir: logs
   live_snapshot_seconds: 5         # equity + spread/Z/PnL per pair at live prices, for the dashboard
-  live_retention_hours: 24         # older live snapshots are deleted (hourly history is kept)
+  live_retention_hours: 24         # older per-pair live snapshots are deleted (hourly history is kept)
+  equity_history_days: 400         # NAV marks: full detail for live_retention_hours, then one per minute
   command_poll_seconds: 2          # dashboard buttons are picked up within this time
   command_max_age_seconds: 120     # older button clicks (bot was down) are rejected
   evaluate_on_start: true          # act on the last closed bar at start-up (live quotes)

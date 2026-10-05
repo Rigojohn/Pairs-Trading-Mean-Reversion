@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PairOrder:
     pair_id: str
-    kind: str  # "open" | "close"
+    kind: str  # "open" | "close" | "reduce" (manual partial close)
     symbol_a: str
     symbol_b: str
     qty_a: float  # signed quantity to trade (+ buy, - sell)
@@ -255,7 +255,7 @@ class PairExecutor(ExecutionEngine):
         start = self._clock()
         a = _Leg(order.symbol_a, order.qty_a, order.ref_a)
         b = _Leg(order.symbol_b, order.qty_b, order.ref_b)
-        stale_ok = order.kind == "close"
+        stale_ok = order.kind != "open"  # a close or reduction must go through even on an old quote
         if order.kind == "open" and (self.venue.quote(a.symbol) is None or self.venue.quote(b.symbol) is None):
             return ExecutionReport(order, ok=False, error="no fresh quotes")  # nothing traded
         try:

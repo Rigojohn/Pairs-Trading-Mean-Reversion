@@ -36,6 +36,13 @@ function cpWlFlush(el) {
   el._send("pick", el._pending);
 }
 
+// On a phone the sidebar is an overlay that covers the page: close it so the opened desk is visible.
+function cpWlCloseSidebar() {
+  if (window.innerWidth > 768) return;
+  const b = document.querySelector('[data-testid="stSidebarCollapseButton"] button');
+  if (b) b.click();
+}
+
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component;
   let el = parentElement.querySelector(".wl");
@@ -53,6 +60,7 @@ export default function (component) {
       el._sent = 0;
       el._since = Date.now();
       cpWlFlush(el);
+      cpWlCloseSidebar();
     });
     el._timer = setInterval(() => {
       if (!el.isConnected) { clearInterval(el._timer); return; }  // a rebuilt sidebar has its own list

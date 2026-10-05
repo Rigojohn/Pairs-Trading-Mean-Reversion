@@ -66,9 +66,10 @@ def _funding_intervals() -> dict[str, float]:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def instruments(symbols: tuple[str, ...]) -> dict[str, dict] | None:
+def instruments(symbols: tuple[str, ...], with_oi: bool = True) -> dict[str, dict] | None:
     """Facts per exchange symbol ('BAND/USDT:USDT'): price, 24h change and volume, open
-    interest, mark/index, funding (rate, next time, interval), tick, lot step, minimums."""
+    interest, mark/index, funding (rate, next time, interval), tick, lot step, minimums.
+    Open interest is one request per symbol: ``with_oi=False`` skips it (the Overview needs only funding)."""
     ex = exchange()
     if ex is None:
         return None
@@ -79,7 +80,7 @@ def instruments(symbols: tuple[str, ...]) -> dict[str, dict] | None:
         out = {}
         for sym in symbols:
             m, t, f = ex.market(sym), tickers.get(sym, {}), rates.get(sym, {})
-            oi = ex.fetch_open_interest(sym)
+            oi = ex.fetch_open_interest(sym) if with_oi else {}
             mark = f.get("markPrice") or t.get("last")
             info = m.get("info", {})
             onboard = info.get("onboardDate")

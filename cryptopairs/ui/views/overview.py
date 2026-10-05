@@ -7,6 +7,8 @@ from the bot's state database; funding rates and BTC history come from Binance.
 """
 
 import math
+import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -45,9 +47,10 @@ def _pct(v, d=2, plus=True):
     return "—" if v is None or not np.isfinite(v) else (f"{v:+.{d}f}%" if plus else f"{v:.{d}f}%")
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def coin_betas(data_dir: str, coins: tuple[str, ...], extend: bool) -> dict[str, float]:
-    """Beta of each coin's hourly returns to BTC over the last 30 days (archive + recent Binance bars)."""
+_BETAS: dict = {"key": None, "at": 0.0, "val": {}, "busy": False}
+
+
+def _compute_betas(data_dir: str, coins: tuple[str, ...], extend: bool) -> dict[str, float]:
     out = {}
     for c in coins:
         if c == "BTC":
@@ -61,6 +64,27 @@ def coin_betas(data_dir: str, coins: tuple[str, ...], extend: bool) -> dict[str,
             continue
         out[c] = F.beta_to(np.diff(data.log_a[-721:]), np.diff(data.log_b[-721:]))
     return out
+
+
+def coin_betas(data_dir: str, coins: tuple[str, ...], extend: bool) -> dict[str, float]:
+    """Beta of each coin's hourly returns to BTC over the last 30 days (archive + recent Binance bars).
+
+    One history load per coin takes tens of seconds on the server and this runs inside the live refresh,
+    which blocks every click while it runs. So it is computed in a background thread (refreshed every
+    15 minutes) and the last result is returned meanwhile ({} until the first one is ready)."""
+    key = (data_dir, coins, extend)
+    if (_BETAS["key"] != key or time.time() - _BETAS["at"] > 900) and not _BETAS["busy"]:
+        _BETAS["busy"] = True
+
+        def work() -> None:
+            try:
+                val = _compute_betas(data_dir, coins, extend)
+                _BETAS.update(key=key, val=val, at=time.time())
+            finally:
+                _BETAS["busy"] = False
+
+        threading.Thread(target=work, daemon=True).start()
+    return _BETAS["val"]
 
 
 @st.fragment(run_every=ctx.refresh or None)
@@ -86,7 +110,8 @@ def live() -> None:
     ts = F.trade_stats(trades)
     book = F.book_summary(rows, nav)
     open_rows = rows[rows["side"] != 0]
-    insts = M.instruments(tuple(sorted(set(open_rows["sym_a"]) | set(open_rows["sym_b"])))) if len(open_rows) else {}
+    insts = (M.instruments(tuple(sorted(set(open_rows["sym_a"]) | set(open_rows["sym_b"]))), with_oi=False)
+             if len(open_rows) else {})
     carry = F.funding_carry(rows, insts)
     ex = D.exposure(rows)
     betas = coin_betas(str(ctx.data_dir), tuple(sorted(ex.index)), not M.offline()) if len(ex) else {}

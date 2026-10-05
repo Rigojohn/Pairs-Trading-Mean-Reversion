@@ -88,8 +88,13 @@ def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, d
             st.warning(f"No bot database in `{state_dir}/` yet. Start the bot first.")
             return None
         idx = dbs.index(default_db) if default_db in dbs else (dbs.index("paper.db") if "paper.db" in dbs else 0)
-        db_name = st.selectbox("Bot", dbs, index=idx, help="state database of a running (or stopped) bot",
+        # The chosen bot is also kept in a plain session key: a page switch (a watchlist click opens the
+        # Pair desk) resets the widget itself, which sent the user back to the default bot.
+        chosen = st.session_state.get("_bot")
+        db_name = st.selectbox("Bot", dbs, index=dbs.index(chosen) if chosen in dbs else idx,
+                               help="state database of a running (or stopped) bot",
                                label_visibility="collapsed" if len(dbs) == 1 else "visible")
+        st.session_state["_bot"] = db_name
         db_path = state_dir / db_name
         brief = D.load_brief(str(db_path), D.version(db_path))
         if not brief["pairs"]:

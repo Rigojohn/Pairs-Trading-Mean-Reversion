@@ -5,7 +5,8 @@ A multi-page web app on top of the bot's state database (read-only):
                   quick actions, PnL attribution, daily PnL calendar, signal radar, PnL correlation
   Pair desk       TradingView charts, live Binance order books and tape, order ticket (open / close /
                   scale out / exit plan), position card, pair profile, parameters
-  Backtest lab    the what-if parameters vs the calibrated ones on real data up to the last hour
+  Backtest lab    the what-if parameters vs the calibrated ones on real data up to the last hour (only for a
+                  bot whose pairs were calibrated with a later period held out: bot A, not bot B)
   Executions      maker share, cost and time per execution
   Risk & controls global switches, per-pair controls, parameter overrides, command history
   System logs     live tail of the bot's log with filters, and the event journal
@@ -62,7 +63,7 @@ def _reload_updated_code() -> None:
 
 _reload_updated_code()
 
-from cryptopairs.ui import desk, live, pulse, theme, tv  # noqa: E402 - after the reload above
+from cryptopairs.ui import desk, lab, live, pulse, theme, tv  # noqa: E402 - after the reload above
 from cryptopairs.ui.widgets import sidebar  # noqa: E402
 
 VIEWS = Path(__file__).resolve().parent / "ui" / "views"
@@ -103,7 +104,10 @@ def main() -> None:
     args = _args()
     pulse.start(str(Path(args.state_dir).resolve()))  # the bot's data version for the smart live refresh
     ctx = sidebar(Path(args.state_dir), Path(args.log_dir), Path(args.config), Path(args.data_dir), args.db)
-    pages = [st.Page(VIEWS / f, title=t, icon=i, url_path=u, default=(k == 0)) for k, (f, t, i, u) in enumerate(PAGES)]
+    lab_ok = ctx is None or lab.available(ctx.brief.get("profile"))  # not for a bot calibrated on all the data (B)
+    pages = [st.Page(VIEWS / f, title=t, icon=i, url_path=u, default=(k == 0),
+                     visibility="visible" if u != "lab" or lab_ok else "hidden")
+             for k, (f, t, i, u) in enumerate(PAGES)]
     page = st.navigation(pages, position="top")
     if ctx is None:
         st.stop()
@@ -111,6 +115,8 @@ def main() -> None:
     # A click on a pair in the sidebar watchlist made it the focus pair; take the user to its desk.
     if st.session_state.pop("_open_desk", False) and page.url_path != "pair":
         st.switch_page(next(p for p in pages if p.url_path == "pair"))
+    if page.url_path == "lab" and not lab_ok:  # e.g. the bot was switched to B while on the lab
+        st.switch_page(pages[0])
     st.session_state["ctx"] = ctx
     page.run()
 

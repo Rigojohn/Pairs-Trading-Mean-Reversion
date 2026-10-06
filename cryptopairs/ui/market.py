@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -22,10 +23,15 @@ from cryptopairs.ui import swr
 
 log = logging.getLogger(__name__)
 HOUR = 3_600_000
-TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": HOUR, "4h": 4 * HOUR}
-# Candles per timeframe on the Pair desk (one request each): 1 day of 1m, 4 of 5m, 10 of 15m, ~6 weeks of 1h,
-# 3 months of 4h, 4 months of 1d. Spread Z reaches further back with the archive (ui/history.py).
+TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": HOUR, "4h": 4 * HOUR, "1d": 24 * HOUR}
+# Candles per timeframe on the Pair desk: 1 day of 1m, 4 of 5m, 10 of 15m, ~6 weeks of 1h, 3 months of 4h,
+# 4 months of 1d. Spread Z reaches further back with the archive (ui/history.py).
 CANDLES = {"1m": 1440, "5m": 1152, "15m": 960, "1h": 1000, "4h": 540, "1d": 120}
+# Binance (through ccxt) returns at most this many candles per request; more come page by page.
+PER_REQUEST = 1000
+# With an open position, an intraday chart reaches back to its entry, at most this many bars:
+# 3 days of 1m, 14 of 5m, 30 of 15m.
+REACH_BACK = {"1m": 3 * 1440, "5m": 14 * 288, "15m": 30 * 96}
 
 
 def offline() -> bool:
@@ -159,18 +165,63 @@ def order_books(symbols: tuple[str, ...], limit: int = 50) -> dict[str, dict] | 
     return swr.get(("books", tuple(symbols), limit), 3, lambda: _order_books(tuple(symbols), limit))
 
 
+def _pages(ex, symbol: str, tf: str, since: int, count: int) -> list:
+    """``count`` candles from ``since`` on, ``PER_REQUEST`` at a time (fewer when they reach now)."""
+    rows: list = []
+    while len(rows) < count:
+        ask = min(PER_REQUEST, count - len(rows))
+        page = ex.fetch_ohlcv(symbol, tf, since=int(since), limit=ask)
+        rows += page or []
+        if not page or len(page) < ask:
+            break
+        since = int(page[-1][0]) + TF_MS[tf]
+    return rows
+
+
+def _frame(rows: list) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=["ts", "o", "h", "l", "c", "v"])
+    df["qv"] = df["v"] * df["c"]
+    return df.astype({"ts": "int64"})
+
+
 def _candles(symbol: str, tf: str, limit: int) -> pd.DataFrame | None:
     ex = exchange()
     if ex is None:
         return None
     try:
-        rows = ex.fetch_ohlcv(symbol, tf, limit=min(int(limit), 1500))
+        if limit <= PER_REQUEST:
+            rows = ex.fetch_ohlcv(symbol, tf, limit=int(limit))
+        else:  # the last ``limit`` bars, the forming one included
+            step = TF_MS[tf]
+            rows = _pages(ex, symbol, tf, (ex.milliseconds() // step - int(limit) + 1) * step, int(limit))
     except Exception as exc:
         log.warning("candles for %s unavailable: %s", symbol, exc)
         return None
-    df = pd.DataFrame(rows, columns=["ts", "o", "h", "l", "c", "v"])
-    df["qv"] = df["v"] * df["c"]
-    return df.astype({"ts": "int64"})
+    return _frame(rows)
+
+
+def _older(symbol: str, tf: str, start: int) -> pd.DataFrame | None:
+    """Closed candles from ``start`` up to half of ``CANDLES[tf]`` before now (the recent part overlaps them)."""
+    ex = exchange()
+    if ex is None:
+        return None
+    step = TF_MS[tf]
+    count = (ex.milliseconds() - start) // step - CANDLES[tf] // 2
+    if count <= 0:
+        return _frame([])
+    try:
+        return _frame(_pages(ex, symbol, tf, start, int(count)))
+    except Exception as exc:
+        log.warning("older candles for %s unavailable: %s", symbol, exc)
+        return None
+
+
+def _older_start(tf: str, start_ms: int) -> int:
+    """``start_ms`` to its day, no earlier than ``REACH_BACK`` bars before today: a cache key that changes
+    about once a day (the chart is sent only from ``start_ms`` on)."""
+    day = 24 * HOUR
+    floor = (time.time() * 1000 - REACH_BACK[tf] * TF_MS[tf]) // day * day
+    return int(max(int(start_ms) // day * day, floor))
 
 
 def _candles_key(symbol: str, tf: str, limit: int) -> tuple:
@@ -194,6 +245,29 @@ def prefetch_candles(symbols: tuple[str, ...], tf: str, limit: int = 500) -> Non
         return
     for sym in symbols:
         swr.warm(_candles_key(sym, tf, limit), lambda s=sym: _candles(s, tf, limit))
+
+
+def candles_from(symbol: str, tf: str, start_ms: int) -> pd.DataFrame | None:
+    """``candles(symbol, tf, CANDLES[tf])`` reaching back to ``start_ms`` (intraday, at most ``REACH_BACK``
+    bars). The older part never changes, so it is fetched again only once an hour."""
+    recent = candles(symbol, tf, CANDLES[tf])
+    if tf not in REACH_BACK or recent is None or recent.empty or int(start_ms) >= int(recent["ts"].iloc[0]):
+        return recent
+    start = _older_start(tf, start_ms)
+    old = swr.get(("older", symbol, tf, start), 3600, lambda: _older(symbol, tf, start))
+    if old is None or old.empty:
+        return recent
+    out = pd.concat([old, recent], ignore_index=True).drop_duplicates("ts", keep="last")
+    return out[out["ts"] >= int(start_ms) // TF_MS[tf] * TF_MS[tf]].sort_values("ts", ignore_index=True)
+
+
+def prefetch_candles_from(symbols: tuple[str, ...], tf: str, start_ms: int) -> None:
+    """Both legs' older candles at once (``candles_from``)."""
+    if exchange() is None or tf not in REACH_BACK:
+        return
+    start = _older_start(tf, start_ms)
+    for sym in symbols:
+        swr.warm(("older", sym, tf, start), lambda s=sym: _older(s, tf, start))
 
 
 def prefetch_books(symbols: tuple[str, ...], limit: int = 50) -> None:

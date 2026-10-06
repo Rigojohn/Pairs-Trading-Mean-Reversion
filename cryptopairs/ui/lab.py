@@ -184,6 +184,15 @@ def data_key(data: PairData) -> tuple:
 
 
 # ----------------------------------------------------------------- backtest
+def available(profile: str | None) -> bool:
+    """Whether the lab is offered for this bot: only if its pairs were calibrated with a later period held out.
+
+    ``research --final`` calibrates on all the data (it leaves runs/<profile>/final.json, bot B): every
+    past period is in-sample for those pairs, so a backtest of them can only flatter them.
+    """
+    return not (Path("runs") / (profile or "latest") / "final.json").exists()
+
+
 def periods(cfg: AppConfig, data: PairData, first_session_ms: int | None) -> dict[str, tuple[int, int]]:
     end = int(data.ts[-1])
     oos = cfg.research.test_start_ms

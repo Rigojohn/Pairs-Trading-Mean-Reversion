@@ -252,6 +252,36 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
         assert "open" in set(table["status"]) and "AAA/BBB" in set(table["pair"])
 
 
+def test_no_backtest_lab_for_a_bot_calibrated_on_all_the_data(tmp_path, monkeypatch):
+    """Bot B's pairs come from `research --final` (all the data): no past period is out of sample for them."""
+    pytest.importorskip("streamlit")
+    from cryptopairs.ui import lab
+
+    rig = _populated(tmp_path)
+    _archive(tmp_path)
+    monkeypatch.chdir(tmp_path)  # runs/<profile>/ is read from the working directory, as on the server
+    profile = StateStore(rig.db).query("SELECT profile FROM sessions")[-1]["profile"]
+    assert lab.available(profile)  # bot A: calibrated with a later period held out
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/backtest.py").run()
+    assert "Sharpe · calibrated" in {m.label for m in at.metric}
+    at.switch_page("ui/views/pair.py").run()
+    assert any("Backtest lab" in m.value for m in at.markdown)
+
+    final =tmp_path / "runs" / (profile or "latest") / "final.json"
+    final.parent.mkdir(parents=True)
+    final.write_text('{"data_end": "2026-09-30 23:00:00"}')
+    assert not lab.available(profile)
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/backtest.py").run()  # an old link to the lab lands on the Overview
+    assert not at.exception, at.exception
+    labels = {m.label for m in at.metric}
+    assert "NAV" in labels and "Sharpe · calibrated" not in labels
+    at.switch_page("ui/views/pair.py").run()  # and the Pair desk no longer points to it
+    assert not at.exception, at.exception
+    assert not any("Backtest lab" in m.value for m in at.markdown)
+
+
 def test_what_if_reaches_the_lab_and_is_applied_through_a_command(tmp_path, monkeypatch):
     pytest.importorskip("streamlit")
     rig = _populated(tmp_path)

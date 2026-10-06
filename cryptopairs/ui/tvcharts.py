@@ -176,6 +176,13 @@ def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: s
     return sorted(out, key=lambda m: m["time"])
 
 
+def last_entry_ms(trades: pd.DataFrame | None) -> int | None:
+    """When the latest trade was entered (its real time), or None without trades."""
+    if trades is None or not len(trades) or "entry_ts" not in trades:
+        return None
+    return event_ms(int(trades["entry_ts"].max()))
+
+
 def position_spans(trades: pd.DataFrame, now_ms: int) -> list[tuple[int, int, int]]:
     """(start ms, end ms, side) of every trade at the real times, the open one up to now."""
     spans = []

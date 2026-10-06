@@ -22,8 +22,9 @@ function cpChartOptions(spec, tz) {
     },
     grid: { vertLines: { color: "#151b27" }, horzLines: { color: "#151b27" } },
     rightPriceScale: { borderColor: "#232b3a", scaleMargins: { top: 0.08, bottom: 0.08 } },
+    // minBarSpacing: zooming out can reach days of 1-minute bars (back to an open position's entry).
     timeScale: { borderColor: "#232b3a", timeVisible: true, secondsVisible: !!spec.seconds, rightOffset: 6,
-                 shiftVisibleRangeOnNewBar: true, tickMarkFormatter: tf.tick },
+                 shiftVisibleRangeOnNewBar: true, tickMarkFormatter: tf.tick, minBarSpacing: 0.05 },
     crosshair: {
       mode: 0,
       vertLine: { color: "#4b5468", labelBackgroundColor: "#232b3a" },

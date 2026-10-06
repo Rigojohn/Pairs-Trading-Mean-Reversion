@@ -50,13 +50,31 @@ def _reductions(p: dict) -> list[int]:
     return [] if r is None or r.empty else [int(x) for x in r["ts"]]
 
 
+def _open_entry_ms(s: K.PairState, trades: pd.DataFrame) -> int | None:
+    """When the open position was entered (real time), or None while flat."""
+    if not s.side or trades is None or trades.empty:
+        return None
+    return TC.last_entry_ms(trades[trades["exit_ts"].isna()])
+
+
+def _reach_ms(tf: str) -> int:
+    """How far back an intraday chart can reach to an open position's entry (market.REACH_BACK)."""
+    return D.now_ms() - M.REACH_BACK[tf] * M.TF_MS[tf]
+
+
 def _chart(s: K.PairState, p: dict, trades: pd.DataFrame, view: str, tf: str) -> dict:
     use, wi = ctx.live_params(pid), ctx.what_if_for(pid)
     max_z = s.scfg.get("max_entry_z")
     if view == "Model":
         return TC.model_spec(p["fit"], trades, D.now_ms(), z_entry=use.z_entry)
     M.prefetch_candles((s.sym_a, s.sym_b), tf, CANDLES[tf])  # both legs at once
-    ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
+    entry, reach = (_open_entry_ms(s, trades), _reach_ms(tf)) if tf in TC.INTRADAY else (None, None)
+    if entry is not None and entry >= reach:  # intraday: the data reaches back to the open position's entry
+        start = max(reach, entry - 60 * M.TF_MS[tf])  # a scroll to the left shows it, with room for its label
+        M.prefetch_candles_from((s.sym_a, s.sym_b), tf, start)
+        ca, cb = M.candles_from(s.sym_a, tf, start), M.candles_from(s.sym_b, tf, start)
+    else:
+        ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
     if view == "Spread Z":
         px, fit = TC.closes(ca, cb), p["fit"]
         if tf not in TC.INTRADAY:  # the whole history: the archive (from 6/2023) before the bot's own records
@@ -157,6 +175,10 @@ def chart_panel() -> None:
         if not spec["series"]:
             st.info("No data for this chart yet (Binance unreachable, or no model history before the bot's first bar).")
         TV.chart(spec, key="pd_chart", rev=f"{pid}-{view}-{tf}-{ctx.window}")
+        entry = _open_entry_ms(s, trades) if view != "Model" and tf in M.REACH_BACK else None
+        if entry is not None and entry < _reach_ms(tf):
+            st.caption(f"The position's entry ({D.clock(entry, '%d/%m %H:%M')}) is older than the {tf} chart reaches "
+                       f"({M.REACH_BACK[tf] * M.TF_MS[tf] // (24 * D.HOUR)} days): a longer timeframe shows it.")
         st.caption({
             "Spread Z": "One Z on every timeframe: the Z the strategy saw at that moment, i.e. Binance prices under "
                         "the fit (α, β, σ) in force then (refitted every hour while flat, frozen at the entry while in "
@@ -327,9 +349,10 @@ def manage() -> None:
             st.caption(("The pair is in a position: the bot keeps its current parameters until it closes, then "
                         "switches. " if p["side"] else
                         "The pair is flat: the bot switches at once (refitting if δ / lookback changed). ")
-                       + "Check the Backtest lab first; every change is logged as an event.")
-        sure = st.checkbox("I have checked the backtest and want this change live", key=f"conf_apply_{pid}",
-                           disabled=not changed)
+                       + ("Check the Backtest lab first; every change is logged as an event." if has_lab else
+                          "Every change is logged as an event."))
+        sure = st.checkbox("I have checked the backtest and want this change live" if has_lab else
+                           "I want this change live", key=f"conf_apply_{pid}", disabled=not changed)
         if st.button("Apply what-if to live bot", type="primary", disabled=not (changed and sure), key=f"apply_{pid}"):
             W.send(ctx.db_path, "set_params", pid, lookback=int(wi.lookback), z_entry=float(wi.z_entry),
                    z_exit=float(wi.z_exit), kalman_delta=wi.kalman_delta)
@@ -337,10 +360,11 @@ def manage() -> None:
             W.send(ctx.db_path, "clear_params", pid)
 
 
+has_lab = L.available(ctx.brief.get("profile"))  # the lab is not offered for a bot calibrated on all the data
 heading("Strategy parameters · calibrated vs in use vs what-if (future trades)")
 p_left, p_right = st.columns([5, 4], gap="large")
 with p_left:
     manage()
 with p_right:
-    st.markdown("**What-if** · the charts above and the Backtest lab follow these")
+    st.markdown("**What-if** · the charts above" + (" and the Backtest lab" if has_lab else "") + " follow these")
     W.what_if_panel(ctx, pid, columns=2)

@@ -7,6 +7,7 @@ last closed hour with bars fetched from Binance, so the lab always reaches "now"
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -21,6 +22,10 @@ from cryptopairs.core.strategy import PairParams
 from cryptopairs.research.backtest import BacktestResult, run_backtest
 from cryptopairs.research.data import DataStore, PairData, make_pair_data
 from cryptopairs.ui import data as D
+from cryptopairs.ui import market as M
+from cryptopairs.ui import swr
+
+log = logging.getLogger(__name__)
 
 HOUR = 3_600_000
 DAY = 24 * HOUR
@@ -98,28 +103,43 @@ def local_symbol(exchange_symbol: str) -> str:
     return base + rest.split(":")[0]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def recent_bars(symbol: str, since_ms: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Closed 1h bars and funding events from Binance after the local archive ends."""
-    import ccxt
+def _recent_bars(symbol: str, since_ms: int) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    ex = M.exchange()
+    if ex is None:
+        return None
+    try:
+        last_closed = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // HOUR - 1) * HOUR
+        rows, t = [], since_ms
+        while t <= last_closed:
+            batch = ex.fetch_ohlcv(symbol, "1h", since=t, limit=1500)
+            if not batch:
+                break
+            rows += batch
+            t = int(batch[-1][0]) + HOUR
+            if len(batch) < 1500:
+                break
+        kl = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        kl = kl[kl["ts"] <= last_closed].astype({"ts": "int64"})
+        kl["quote_volume"] = kl.pop("volume") * kl["close"]
+        fr = ex.fetch_funding_rate_history(symbol, since=since_ms - 8 * HOUR, limit=1000) or []
+        fund = pd.DataFrame({"ts": [int(f["timestamp"]) for f in fr], "rate": [float(f["fundingRate"]) for f in fr]})
+        return kl, fund.astype({"ts": "int64"})
+    except Exception as exc:
+        log.warning("recent bars of %s unavailable: %s", symbol, exc)
+        return None
 
-    ex = ccxt.binanceusdm({"enableRateLimit": True, "timeout": 15_000})
-    last_closed = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // HOUR - 1) * HOUR
-    rows, t = [], since_ms
-    while t <= last_closed:
-        batch = ex.fetch_ohlcv(symbol, "1h", since=t, limit=1500)
-        if not batch:
-            break
-        rows += batch
-        t = int(batch[-1][0]) + HOUR
-        if len(batch) < 1500:
-            break
-    kl = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
-    kl = kl[kl["ts"] <= last_closed].astype({"ts": "int64"})
-    kl["quote_volume"] = kl.pop("volume") * kl["close"]
-    fr = ex.fetch_funding_rate_history(symbol, since=since_ms - 8 * HOUR, limit=1000) or []
-    fund = pd.DataFrame({"ts": [int(f["timestamp"]) for f in fr], "rate": [float(f["fundingRate"]) for f in fr]})
-    return kl, fund.astype({"ts": "int64"})
+
+def recent_bars(symbol: str, since_ms: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Closed 1h bars and funding events from Binance after the local archive ends.
+    From memory, refreshed in the background (ui/swr.py): a click does not wait for Binance."""
+    got = swr.get(("recent_bars", symbol, int(since_ms)), 300, lambda: _recent_bars(symbol, int(since_ms)))
+    if got is None:
+        raise ConnectionError("Binance unreachable")
+    return got
+
+
+def warm_recent_bars(symbol: str, since_ms: int) -> None:
+    swr.warm(("recent_bars", symbol, int(since_ms)), lambda: _recent_bars(symbol, int(since_ms)))
 
 
 def _merge(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
@@ -128,7 +148,7 @@ def _merge(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([old, new[old.columns]], ignore_index=True).drop_duplicates("ts", keep="last").sort_values("ts")
 
 
-@st.cache_data(ttl=300, show_spinner=False, max_entries=6)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=32)
 def pair_history(data_dir: str, sym_a: str, sym_b: str, extend: bool) -> tuple[PairData, dict]:
     """Both legs from the local archive, plus the bars since it ends (when ``extend``)."""
     store = DataStore(Path(data_dir))

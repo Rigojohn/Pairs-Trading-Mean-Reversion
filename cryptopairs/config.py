@@ -80,6 +80,17 @@ class StrategyConfig:
     funding_filter: str = "off"
     funding_lookback_hours: int = 168
     funding_hold_hours: float = 120.0
+    # Funding exit (not in the paper): close an open position when the funding it is expected to pay
+    # over the next funding_exit_hours exceeds what it is expected to earn over the same hours
+    # (plus the cost of closing). Rates are the trailing average of funding_lookback_hours.
+    #   "off"          never
+    #   "edge"         expected earnings = the distance Z still has to travel to the exit, reverting
+    #                  at the pair's half-life; a loser far from its exit is held, a winner near it closed
+    #   "profit_only"  close a position that is in profit as soon as the funding over the hours
+    #                  exceeds the cost of closing (losers are always kept)
+    funding_exit: str = "off"
+    funding_exit_hours: float = 8.0
+    funding_exit_cooldown_hours: float = 24.0  # no re-entry right after (the funding would be paid again)
     min_edge_cost_multiple: float | None = None
     # Entry threshold. "fixed": the pair's calibrated z_entry (paper). "rolling_quantile": the
     # adaptive_quantile of |Z| over the previous adaptive_window bars, at least adaptive_min_z:
@@ -114,6 +125,10 @@ class StrategyConfig:
             raise ValueError(f"unknown estimator {self.estimator!r}")
         if self.funding_filter not in ("off", "short_positive", "net_cost"):
             raise ValueError(f"unknown funding_filter {self.funding_filter!r}")
+        if self.funding_exit not in ("off", "edge", "profit_only"):
+            raise ValueError(f"unknown funding_exit {self.funding_exit!r}")
+        if self.funding_exit_hours <= 0 or self.funding_exit_cooldown_hours < 0:
+            raise ValueError("strategy.funding_exit_hours must be > 0 and funding_exit_cooldown_hours >= 0")
         if not 0 < self.beta_min < self.beta_max:
             raise ValueError("strategy.beta_min must be > 0 and < beta_max")
         if self.kalman_history is not None and self.kalman_history < 2 * self.kalman_warmup:

@@ -18,3 +18,4 @@ CryptoPairTrading-main.zip
 
 # Copied from cryptopairs/ui/vendor/ when the dashboard starts
 cryptopairs/static/lightweight-charts.standalone.production.js
+cryptopairs/static/ver/

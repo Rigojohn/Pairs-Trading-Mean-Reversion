@@ -14,8 +14,9 @@ page_title("Risk & controls", "The dashboard never trades: buttons queue a comma
                               "within ~2 s, and writes the result below")
 
 
-@st.fragment(run_every=ctx.refresh or None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def live() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_controls_live")
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if d["pairs"].empty:
         st.info("The bot has not saved any pair yet.")

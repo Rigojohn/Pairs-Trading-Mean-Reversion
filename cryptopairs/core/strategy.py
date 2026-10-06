@@ -61,7 +61,7 @@ class PairStrategy:
         "params", "cfg", "initial_equity", "round_trip_cost", "anchor", "long_pays_funding",
         "side", "fit", "entry_equity", "entry_index", "entry_ts", "prev_exit_z",
         "cooldown_until", "deactivated", "peak_equity", "_cooldown_ms", "hold_limit",
-        "z_exit_override", "stop_pct_override",
+        "z_exit_override", "stop_pct_override", "half_life",
     )
 
     def __init__(
@@ -94,6 +94,7 @@ class PairStrategy:
         self.peak_equity = float(initial_equity)
         self._cooldown_ms = int(cfg.cooldown_hours * HOUR_MS)
         self.hold_limit = -1  # bars allowed in the current trade by the half-life time stop
+        self.half_life = math.nan  # of the open trade's spread (bars), for the funding exit
         # Manual exit plan for the open position (dashboard); None = the configured rule.
         self.z_exit_override: float | None = None
         self.stop_pct_override: float | None = None
@@ -190,6 +191,39 @@ class PairStrategy:
             return "time_stop"
         return None
 
+    def check_funding_exit(
+        self, equity: float, z_buy: float, z_sell: float, funding_a: float, funding_b: float,
+    ) -> bool:
+        """True when the funding this position pays over ``funding_exit_hours`` outweighs what it earns.
+
+        ``funding_a/b``: trailing average funding rate per hour of each leg (NaN = unknown, no exit).
+        Both rules compare, per unit gross notional, the funding over the hours with the cost of
+        closing (half a round trip); ``edge`` adds the expected earnings of the hours as well.
+        """
+        mode = self.cfg.funding_exit
+        f = self.fit
+        if mode == "off" or self.side == FLAT or f is None or math.isnan(funding_a) or math.isnan(funding_b):
+            return False
+        w_a, w_b = 1.0 / (1.0 + f.beta), f.beta / (1.0 + f.beta)
+        if self.side == LONG:  # long A, short B
+            r_long, w_long, r_short, w_short = funding_a, w_a, funding_b, w_b
+        else:
+            r_long, w_long, r_short, w_short = funding_b, w_b, funding_a, w_a
+        long_part = w_long * r_long if self.long_pays_funding else 0.0
+        per_hour = long_part - w_short * r_short  # > 0: the position pays
+        if per_hour <= 0:
+            return False
+        hours = self.cfg.funding_exit_hours
+        hurdle = hours * per_hour + 0.5 * self.round_trip_cost
+        if mode == "profit_only":
+            return equity > self.entry_equity and hours * per_hour > 0.5 * self.round_trip_cost
+        if not (math.isfinite(self.half_life) and self.half_life > 0):
+            return False
+        z_exit = self.exit_z()
+        dist = max(0.0, (-z_exit - z_sell) if self.side == LONG else (z_buy - z_exit))
+        earned = f.sigma / (1.0 + f.beta) * dist * (1.0 - 2.0 ** (-hours / self.half_life))
+        return earned < hurdle
+
     # -------------------------------------------------------------- entry
     def check_entry(
         self, ts: int, bar_index: int, z_buy: float, z_sell: float,
@@ -258,6 +292,7 @@ class PairStrategy:
         self.entry_index = bar_index
         self.entry_equity = float(entry_equity)
         self.prev_exit_z = z_sell if side == LONG else z_buy
+        self.half_life = half_life
         k = self.cfg.time_stop_halflives
         self.hold_limit = -1
         if k is not None and math.isfinite(half_life) and half_life > 0:
@@ -272,9 +307,12 @@ class PairStrategy:
         self.entry_ts = -1
         self.prev_exit_z = math.nan
         self.hold_limit = -1
+        self.half_life = math.nan
         self.z_exit_override = self.stop_pct_override = None
         if reason in STOP_REASONS:
             self.cooldown_until = ts + self._cooldown_ms
+        elif reason == "funding_exit":
+            self.cooldown_until = ts + int(self.cfg.funding_exit_cooldown_hours * HOUR_MS)
         if reason == "liquidation":
             self.deactivated = True
 

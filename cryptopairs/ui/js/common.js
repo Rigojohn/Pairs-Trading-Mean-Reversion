@@ -40,6 +40,8 @@ class CpMarketHub {
     this.state = { book: {}, bbo: {}, trades: [], mark: {}, kline: {} };
     this.msgs = 0; this.rate = 0; this.lastMsg = 0; this.lag = null;
     this.timer = null;
+    this.reqId = 0;
+    this.seeded = new Set();
     setInterval(() => { this.rate = this.msgs; this.msgs = 0; this.notify(); }, 1000);
   }
 
@@ -60,37 +62,105 @@ class CpMarketHub {
       s.symbols.forEach((x) => syms.add(x.toLowerCase()));
       s.klines.forEach(([sym, tf]) => kl.add(sym.toLowerCase() + "@kline_" + tf));
     }
-    const urls = {};
+    const out = {};
     for (const route of Object.keys(CP_ROUTES)) {
       const streams = [];
       for (const s of [...syms].sort()) CP_ROUTES[route].forEach((k) => streams.push(s + "@" + k));
       if (route === "market") [...kl].sort().forEach((k) => streams.push(k));
-      urls[route] = streams.length ? CP_WS + "/" + route + "/stream?streams=" + streams.join("/") : null;
+      out[route] = streams;
     }
-    return urls;
+    return out;
+  }
+
+  // A new pair's streams are added to the open connection with a SUBSCRIBE message (and old ones
+  // dropped with UNSUBSCRIBE): no new connection, so a pair switch shows its book in ~0.2 s instead
+  // of a fresh TLS handshake, and the pair still on screen never loses its feed.
+  // A symbol just added gets one REST snapshot (book, best bid/ask, mark/funding, last trades): a quiet
+  // market can take a second or two to send its first stream message. The streams overwrite it.
+  seed(symbols) {
+    const api = "https://fapi.binance.com/fapi/v1/", st = this.state;
+    const get = (path) => fetch(api + path).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    for (const S of symbols) {
+      if (this.seeded.has(S)) continue;
+      this.seeded.add(S);
+      get(`depth?symbol=${S}&limit=20`).then((b) => {
+        if (b && !st.book[S]) { st.book[S] = { bids: b.bids, asks: b.asks, ts: b.E || Date.now() }; this.notify(); }
+      });
+      get(`ticker/bookTicker?symbol=${S}`).then((t) => {
+        if (t && !st.bbo[S]) {
+          st.bbo[S] = { bid: +t.bidPrice, ask: +t.askPrice, bq: +t.bidQty, aq: +t.askQty, ts: Date.now() };
+          this.notify();
+        }
+      });
+      get(`premiumIndex?symbol=${S}`).then((m) => {
+        if (m && !st.mark[S]) {
+          st.mark[S] = { mark: +m.markPrice, index: +m.indexPrice, rate: +m.lastFundingRate, next: m.nextFundingTime, ts: Date.now() };
+          this.notify();
+        }
+      });
+      get(`aggTrades?symbol=${S}&limit=30`).then((tr) => {
+        if (!tr || st.trades.some((t) => t.s === S)) return;
+        tr.forEach((t) => st.trades.push({ s: S, p: +t.p, q: +t.q, sell: !!t.m, T: t.T }));
+        st.trades.sort((x, y) => y.T - x.T);
+        if (st.trades.length > 80) st.trades.length = 80;
+        this.notify();
+      });
+    }
   }
 
   reconfigure() {
-    const urls = this.wanted();
+    const syms = new Set(), keep = new Set();
+    for (const s of this.subs.values()) {
+      s.symbols.forEach((x) => { syms.add(x.toUpperCase()); keep.add(x.toUpperCase()); });
+      s.klines.forEach(([x]) => keep.add(x.toUpperCase()));
+    }
+    // A symbol no longer on the page stops updating: forget its data, so a later visit never shows it as live.
+    const st = this.state;
+    for (const S of this.symsNow || []) {
+      if (keep.has(S)) continue;
+      delete st.book[S]; delete st.bbo[S]; delete st.mark[S]; delete st.kline[S];
+      st.trades = st.trades.filter((t) => t.s !== S);
+      this.seeded.delete(S);
+    }
+    this.symsNow = keep;
+    this.seed(syms);
+    const want = this.wanted();
     for (const route of Object.keys(CP_ROUTES)) {
-      const cur = this.socks[route];
-      if (cur && cur.url === urls[route]) continue;
-      if (cur) { cur.closed = true; try { cur.ws.close(); } catch (e) { /* already closed */ } }
-      delete this.socks[route];
-      if (urls[route]) this.connect(route, urls[route], 1000);
+      const streams = want[route], cur = this.socks[route];
+      if (!streams.length) {
+        if (cur) { cur.closed = true; try { cur.ws.close(); } catch (e) { /* already closed */ } delete this.socks[route]; }
+        continue;
+      }
+      if (!cur) { this.connect(route, streams, 1000); continue; }
+      cur.want = streams;  // a connection still opening applies it on open; a reconnect starts with it
+      if (cur.ws.readyState === WebSocket.OPEN) this.sync(cur);
     }
   }
 
-  connect(route, url, backoff) {
-    const sock = { url, backoff, status: "connecting", closed: false, ws: new WebSocket(url) };
+  sync(sock) {
+    const want = new Set(sock.want), have = sock.live;
+    const add = [...want].filter((x) => !have.has(x)), drop = [...have].filter((x) => !want.has(x));
+    const send = (method, params) => {
+      for (let i = 0; i < params.length; i += 200) {  // Binance takes a list per message; keep them short
+        sock.ws.send(JSON.stringify({ method, params: params.slice(i, i + 200), id: ++this.reqId }));
+      }
+    };
+    if (add.length) send("SUBSCRIBE", add);
+    if (drop.length) send("UNSUBSCRIBE", drop);
+    sock.live = want;
+  }
+
+  connect(route, streams, backoff) {
+    const url = CP_WS + "/" + route + "/stream?streams=" + streams.join("/");
+    const sock = { backoff, status: "connecting", closed: false, want: streams, live: new Set(streams), ws: new WebSocket(url) };
     this.socks[route] = sock;
-    sock.ws.onopen = () => { sock.status = "live"; sock.backoff = 1000; this.notify(); };
+    sock.ws.onopen = () => { sock.status = "live"; sock.backoff = 1000; this.sync(sock); this.notify(); };
     sock.ws.onmessage = (ev) => { try { this.ingest(JSON.parse(ev.data)); } catch (e) { /* bad frame */ } };
     sock.ws.onclose = () => {
       if (sock.closed || this.socks[route] !== sock) return;
       sock.status = "reconnecting";
       this.notify();
-      setTimeout(() => { if (this.socks[route] === sock && !sock.closed) this.connect(route, url, Math.min(sock.backoff * 2, 30000)); },
+      setTimeout(() => { if (this.socks[route] === sock && !sock.closed) this.connect(route, sock.want, Math.min(sock.backoff * 2, 30000)); },
                  sock.backoff + Math.random() * 500);
     };
   }

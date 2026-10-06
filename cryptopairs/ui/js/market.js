@@ -107,6 +107,21 @@ function cpTape(el, d, hub) {
 
 const CP_VIEWS = { ticker: cpTicker, book: cpBooks, tape: cpTape };
 
+// A click on another pair in the watchlist (event "cp-pair", js/watchlist.js) switches the panel to that
+// pair at once, with the data the click carries; the page run then mounts the new pair's own panel. Until
+// then a redraw of this (old) panel from Python keeps the clicked pair. "cp-pair-cancel" goes back.
+function cpMkShow(st) {
+  const d = st.override ? { ...st.data, ...st.override } : st.data;
+  const view = CP_VIEWS[d.view] || cpTicker;
+  st.draw = (hub) => view(st.el, d, hub);
+  const key = JSON.stringify([d.a, d.b]);
+  if (key !== st.key) {
+    st.key = key;
+    cpHub().subscribe(st.token, [d.a, d.b], [], (hub) => st.draw(hub));
+  }
+  st.draw(cpHub());
+}
+
 export default function (component) {
   const { data, parentElement } = component;
   let st = parentElement.__cpMk;
@@ -115,17 +130,18 @@ export default function (component) {
     st.el.className = "cp-mk";
     parentElement.appendChild(st.el);
     st.tick = setInterval(() => st.draw && st.draw(cpHub()), 1000); // countdowns and staleness
+    st.onPair = (ev) => { st.override = ev.detail; cpMkShow(st); };
+    st.onCancel = () => { st.override = null; cpMkShow(st); };
+    window.addEventListener("cp-pair", st.onPair);
+    window.addEventListener("cp-pair-cancel", st.onCancel);
   }
-  const view = CP_VIEWS[data.view] || cpTicker;
-  st.draw = (hub) => view(st.el, data, hub);
-  const key = JSON.stringify([data.a, data.b]);
-  if (key !== st.key) {
-    st.key = key;
-    cpHub().subscribe(st.token, [data.a, data.b], [], (hub) => st.draw(hub));
-  }
-  st.draw(cpHub());
+  st.data = data;
+  if (st.override && st.override.pid === data.pid) st.override = null;  // Python caught up
+  cpMkShow(st);
   return () => {
     clearInterval(st.tick);
+    window.removeEventListener("cp-pair", st.onPair);
+    window.removeEventListener("cp-pair-cancel", st.onCancel);
     cpHub().unsubscribe(st.token);
     delete parentElement.__cpMk;
   };

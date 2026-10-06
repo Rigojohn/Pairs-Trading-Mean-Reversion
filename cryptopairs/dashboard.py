@@ -36,7 +36,7 @@ import streamlit as st
 # so a code update never leaves a running dashboard half old, half new.
 CODE = ["cryptopairs.runtime.store", "cryptopairs.research.pairstats", "cryptopairs.ui.theme", "cryptopairs.ui.data",
         "cryptopairs.ui.market", "cryptopairs.ui.lab", "cryptopairs.ui.live", "cryptopairs.ui.tv",
-        "cryptopairs.ui.fund", "cryptopairs.ui.tvcharts", "cryptopairs.ui.ticket", "cryptopairs.ui.charts",
+        "cryptopairs.ui.fund", "cryptopairs.ui.tvcharts", "cryptopairs.ui.history", "cryptopairs.ui.ticket", "cryptopairs.ui.charts",
         "cryptopairs.ui.widgets", "cryptopairs.ui.desk"]
 _reload_lock = threading.Lock()
 
@@ -62,7 +62,7 @@ def _reload_updated_code() -> None:
 
 _reload_updated_code()
 
-from cryptopairs.ui import live, theme, tv  # noqa: E402 - after the reload above
+from cryptopairs.ui import desk, live, pulse, theme, tv  # noqa: E402 - after the reload above
 from cryptopairs.ui.widgets import sidebar  # noqa: E402
 
 VIEWS = Path(__file__).resolve().parent / "ui" / "views"
@@ -70,6 +70,7 @@ PAGES = [  # (file, title, icon, url)
     ("overview.py", "Overview", ":material/dashboard:", "overview"),
     ("pair.py", "Pair desk", ":material/candlestick_chart:", "pair"),
     ("backtest.py", "Backtest lab", ":material/science:", "lab"),
+    ("journal.py", "Journal", ":material/menu_book:", "journal"),
     ("executions.py", "Executions", ":material/receipt_long:", "executions"),
     ("controls.py", "Risk & controls", ":material/tune:", "controls"),
     ("logs.py", "System logs", ":material/terminal:", "logs"),
@@ -96,15 +97,17 @@ def _static_files() -> bool:
 
 
 def main() -> None:
-    st.set_page_config(page_title="CryptoPairs Desk", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="CryptoPairs Desk", page_icon="📈", layout="wide", initial_sidebar_state="auto")
     theme.apply()
     _static_files()
     args = _args()
+    pulse.start(str(Path(args.state_dir).resolve()))  # the bot's data version for the smart live refresh
     ctx = sidebar(Path(args.state_dir), Path(args.log_dir), Path(args.config), Path(args.data_dir), args.db)
     pages = [st.Page(VIEWS / f, title=t, icon=i, url_path=u, default=(k == 0)) for k, (f, t, i, u) in enumerate(PAGES)]
     page = st.navigation(pages, position="top")
     if ctx is None:
         st.stop()
+    desk.warm(ctx)  # every pair's data loads in the background, so a click on a pair need not wait
     # A click on a pair in the sidebar watchlist made it the focus pair; take the user to its desk.
     if st.session_state.pop("_open_desk", False) and page.url_path != "pair":
         st.switch_page(next(p for p in pages if p.url_path == "pair"))

@@ -32,18 +32,12 @@ page_title(f"{a} / {b}", f"Pair desk · {pid} · pick another pair in the watchl
 
 VIEWS = {"Spread Z": ["1m", "5m", "15m", "1h", "4h", "1d"], "Legs": ["5m", "15m", "1h", "4h"],
          "Relative": ["5m", "15m", "1h", "4h"], "Model": ["1h"]}
-# Candles per timeframe (one request each): 1 day of 1m, 4 of 5m, 10 of 15m, ~6 weeks of 1h, 3 months of 4h,
-# 4 months of 1d. Spread Z reaches further back with the archive (ui/history.py).
-CANDLES = {"1m": 1440, "5m": 1152, "15m": 960, "1h": 1000, "4h": 540, "1d": 120}
+CANDLES = M.CANDLES
 # Spread Z points sent per refresh (the chart reruns every few seconds): about what one screen holds
 # at 1h and 4h; 1d carries the whole history since 2023.
 HISTORY_BARS = {"1h": 1500, "4h": 1500, "1d": 2000}
 
-bar = st.container(horizontal=True, gap="large", vertical_alignment="bottom")
-view = bar.segmented_control("Chart", list(VIEWS), default="Spread Z", key="pd_view", required=True) or "Spread Z"
-tfs = VIEWS[view]
-tf = bar.segmented_control("Timeframe", tfs, default="1h" if "1h" in tfs else tfs[0], key=f"pd_tf_{view}",
-                           required=True) or ("1h" if "1h" in tfs else tfs[0])
+M.prefetch_books((pair["a"], pair["b"]))  # the ticket's preview book loads while the desk draws
 
 
 def _state(d: dict) -> tuple[K.PairState | None, dict]:
@@ -56,11 +50,12 @@ def _reductions(p: dict) -> list[int]:
     return [] if r is None or r.empty else [int(x) for x in r["ts"]]
 
 
-def _chart(s: K.PairState, p: dict, trades: pd.DataFrame) -> dict:
+def _chart(s: K.PairState, p: dict, trades: pd.DataFrame, view: str, tf: str) -> dict:
     use, wi = ctx.live_params(pid), ctx.what_if_for(pid)
     max_z = s.scfg.get("max_entry_z")
     if view == "Model":
         return TC.model_spec(p["fit"], trades, D.now_ms(), z_entry=use.z_entry)
+    M.prefetch_candles((s.sym_a, s.sym_b), tf, CANDLES[tf])  # both legs at once
     ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
     if view == "Spread Z":
         px, fit = TC.closes(ca, cb), p["fit"]
@@ -84,8 +79,9 @@ def _chart(s: K.PairState, p: dict, trades: pd.DataFrame) -> dict:
     return TC.relative_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), tf, trades)
 
 
-@st.fragment(run_every=ctx.refresh or None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def desk() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_pair_desk")
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
         st.info("This pair is not in the selected bot.")
@@ -135,10 +131,29 @@ def desk() -> None:
                  help="current rates of the legs. Longs pay a positive rate, shorts a negative one.")
     g.metric("Realized", f"{r['realized']:+,.4f}", f"{int(r['trades'])} trades · {int(r['wins'])} won", **info)
 
+
+desk()
+
+
+# The chart with its own controls: a click on a view or a timeframe reruns only this part (~0.3 s),
+# not the whole page. The book and the tape are live in the browser; their data (fit, position)
+# follows here every few seconds.
+@st.fragment(run_every=W.every(ctx.refresh))
+def chart_panel() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_pair_chart_panel")
+    d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
+    if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
+        return
+    s, p = _state(d)
+    bar = st.container(horizontal=True, gap="large", vertical_alignment="bottom")
+    view = bar.segmented_control("Chart", list(VIEWS), default="Spread Z", key="pd_view", required=True) or "Spread Z"
+    tfs = VIEWS[view]
+    tf = bar.segmented_control("Timeframe", tfs, default="1h" if "1h" in tfs else tfs[0], key=f"pd_tf_{view}",
+                               required=True) or ("1h" if "1h" in tfs else tfs[0])
     trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
     left, right = st.columns([8, 4], gap="medium")
     with left:
-        spec = _chart(s, p, trades)
+        spec = _chart(s, p, trades, view, tf)
         if not spec["series"]:
             st.info("No data for this chart yet (Binance unreachable, or no model history before the bot's first bar).")
         TV.chart(spec, key="pd_chart", rev=f"{pid}-{view}-{tf}-{ctx.window}")
@@ -166,13 +181,16 @@ def desk() -> None:
     with right:
         TV.market("book", key=f"pd_book_{pid}", **s.market_data())
         TV.market("tape", key=f"pd_tape_{pid}", rows=18, **s.market_data())
+    for t in VIEWS["Spread Z"]:  # the other timeframes load in the background: the next click finds them
+        M.prefetch_candles((s.sym_a, s.sym_b), t, CANDLES[t])
 
 
-desk()
+chart_panel()
 
 
-@st.fragment(run_every=max(ctx.refresh, 3) if ctx.refresh else None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def trade() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_pair_trade")
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if d["pairs"].empty or pid not in set(d["pairs"]["pair_id"]):
         return
@@ -270,9 +288,10 @@ profile()
 
 
 # ----------------------------------------------------------- parameters
-@st.fragment(run_every=ctx.refresh or None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def manage() -> None:
     """Parameters for future trades; refreshed so overrides show as soon as the bot applies them."""
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_pair_manage")
     brief = D.load_brief(str(ctx.db_path), D.version(ctx.db_path))
     p = next((x for x in brief["pairs"] if x["id"] == pid), None)
     if p is None:

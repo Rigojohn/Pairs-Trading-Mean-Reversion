@@ -12,3 +12,4 @@ tests/
 *.zip
 *.pdf
 .git/
+cryptopairs/static/ver/

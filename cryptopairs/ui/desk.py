@@ -84,10 +84,7 @@ class PairState:
 
     @property
     def fit(self) -> dict | None:
-        s = self.strat
-        if s.get("beta") is None or not s.get("sigma"):
-            return None
-        return {"alpha": float(s["alpha"]), "beta": float(s["beta"]), "sigma": float(s["sigma"])}
+        return D.fit_of(self.strat)
 
     @property
     def bot_up(self) -> bool:
@@ -103,14 +100,11 @@ class PairState:
 
     def position(self) -> dict | None:
         """What the browser needs for the live PnL ticker."""
-        if not self.side:
-            return None
-        b = self.book
-        return {"side": self.side, "qty_a": b["qty_a"], "qty_b": b["qty_b"], "entry_a": b["entry_px_a"],
-                "entry_b": b["entry_px_b"], "cash": b["cash"], "entry_equity": self.strat.get("entry_equity")}
+        return D.position_of(self.strat, self.book)
 
     def market_data(self) -> dict:
-        return {"a": self.id_a, "b": self.id_b, "label_a": self.a, "label_b": self.b, "digits_a": self.digits_a,
+        """The live panels' data (js/market.js); the watchlist sends the same per pair (widgets.watchlist_rows)."""
+        return {"pid": self.pid, "a": self.id_a, "b": self.id_b, "label_a": self.a, "label_b": self.b, "digits_a": self.digits_a,
                 "digits_b": self.digits_b, "fit": self.fit, "position": self.position(),
                 "z_entry": self.params["z_entry"]}
 
@@ -141,6 +135,20 @@ def load_state(d: dict, ctx, pid: str, pending: pd.DataFrame) -> PairState | Non
     )
 
 
+def warm(ctx) -> None:
+    """Start the background warm-up of every pair of the bot (ui/history.py ``warm``): open positions
+    first with their whole Spread Z history, then the others' candles and recent bars."""
+    if M.offline() or not ctx.brief.get("pairs"):
+        return
+    from cryptopairs.ui import history as HI
+
+    scfg = _merged_cfg(ctx.brief.get("config") or {}, app_config(str(ctx.config_path), ctx.brief.get("profile")))["strategy"]
+    hist = (scfg.get("kalman_history", 8760), scfg.get("kalman_outlier_z", 4.0), int(scfg.get("kalman_max_skips", 48)))
+    jobs = [(p["id"], p["a"], p["b"], (int(p["lookback"]), p["kalman_delta"], *hist) if p["side"] else None)
+            for p in sorted(ctx.brief["pairs"], key=lambda p: p["side"] == 0)]
+    HI.warm(str(ctx.data_dir), jobs, M.CANDLES["1h"])
+
+
 def _merged_cfg(session: dict, app: AppConfig) -> dict:
     """The running session's strategy and risk settings, completed by the profile's defaults."""
     return {"strategy": {**asdict(app.strategy), **(session.get("strategy") or {})},
@@ -150,8 +158,7 @@ def _merged_cfg(session: dict, app: AppConfig) -> dict:
 def _guess_digits(rows: pd.DataFrame, pid: str, col: str) -> int:
     """Price decimals from the last mark when Binance's tick size is not available."""
     r = rows[rows["pair"] == pid]
-    px = float(r[col].iloc[0]) if len(r) and pd.notna(r[col].iloc[0]) else 1.0
-    return int(min(8, max(2, 4 - math.floor(math.log10(px))))) if px > 0 else 4
+    return M.guess_digits(r[col].iloc[0] if len(r) and pd.notna(r[col].iloc[0]) else None)
 
 
 # --------------------------------------------------------------- feedback

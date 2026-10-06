@@ -181,7 +181,7 @@ def _populated(tmp_path) -> Rig:
     return rig
 
 
-PAGES = ["overview", "pair", "backtest", "executions", "controls", "logs"]
+PAGES = ["overview", "pair", "backtest", "journal", "executions", "controls", "logs"]
 LOG = """2026-10-01 20:51:59,036 INFO    cryptopairs.runtime.app: restored state: 1 open position(s)
 2026-10-01 20:52:03,468 WARNING cryptopairs.runtime.feed: stale quote for AAA/USDT:USDT
 2026-10-01 20:52:04,001 ERROR   cryptopairs.runtime.commands: command 3 failed
@@ -236,6 +236,7 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
                      "Funding carry", "Open positions", "Hit rate"},
         "pair": {"Position", "Unrealized", "Z now", "β in use"},
         "backtest": {"Sharpe · calibrated", "Total return · calibrated", "Trades · calibrated"},
+        "journal": set(),
         "executions": {"Executions", "Maker share"},
         "controls": {"Leverage", "Stop-loss", "Max open pairs"},
         "logs": {"Lines shown", "Warnings", "Errors"},
@@ -246,6 +247,9 @@ def test_every_page_renders(tmp_path, monkeypatch, page):
         assert next(m for m in at.metric if m.label == "Maker share").value == "28%"
     if page == "logs":
         assert next(m for m in at.metric if m.label == "Errors").value == "1"
+    if page == "journal":  # the scenario's open position is in the journal
+        table = at.dataframe[0].value
+        assert "open" in set(table["status"]) and "AAA/BBB" in set(table["pair"])
 
 
 def test_what_if_reaches_the_lab_and_is_applied_through_a_command(tmp_path, monkeypatch):

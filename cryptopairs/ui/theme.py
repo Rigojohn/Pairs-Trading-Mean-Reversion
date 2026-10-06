@@ -34,6 +34,8 @@ CSS = f"""
 <style>
 .block-container {{ padding-top: 4.6rem; padding-bottom: 2rem; max-width: 100%; }}
 [data-testid="stSkillsNudge"] {{ display: none !important; }}
+/* Invisible helpers (js/pulse.js, js/relay.js): no gap in the layout */
+[class*="st-key-pulse_"], .st-key-pick_relay {{ display: none !important; }}
 /* KPI cards: an even grid (4 per row, 8 on wide screens) instead of squeezed columns */
 [class*="st-key-kpi"] {{ display: grid !important; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: .6rem !important; }}
@@ -114,6 +116,37 @@ CSS = f"""
 @media (max-width: 1300px) {{ .perf-head {{ grid-template-columns: repeat(3, 1fr); }}
   .perf-head .ph:nth-child(4) {{ border-left: none; }} .perf-head .ph {{ border-top: 1px solid {BORDER}; }}
   .perf-head .ph:nth-child(-n+3) {{ border-top: none; }} }}
+/* A click on a pair (js/watchlist.js): a bar at the top and the previous pair's desk dimmed until the new one is drawn */
+#cp-loading {{ position: fixed; top: 0; left: 0; right: 0; z-index: 1000000; pointer-events: none; display: none; }}
+#cp-loading.on {{ display: block; }}
+#cp-loading i {{ display: block; height: 3px; background: linear-gradient(90deg, transparent, {AMBER}, transparent);
+  background-size: 40% 100%; background-repeat: no-repeat; animation: cp-load 0.9s linear infinite; }}
+#cp-loading span {{ position: absolute; top: 10px; left: 50%; transform: translateX(-50%); font-size: .78rem;
+  font-weight: 600; color: {AMBER}; background: {PANEL}; border: 1px solid rgba(240,180,41,.55); border-radius: 999px;
+  padding: 3px 12px; white-space: nowrap; }}
+@keyframes cp-load {{ from {{ background-position: -40% 0; }} to {{ background-position: 140% 0; }} }}
+.cp-switching [data-testid="stMain"] .block-container {{ opacity: .4; transition: opacity .12s; }}
+.cp-switching-desk [data-testid="stMain"] [data-testid="stElementContainer"]:not([class*="st-key-pd_ticker_"]):not([class*="st-key-pd_book_"]):not([class*="st-key-pd_tape_"]):not(:has(.desk-title)) {{
+  opacity: .35; transition: opacity .12s; }}
+/* Phones: two KPI cards per row so no number is cut, less padding, bigger touch targets */
+@media (max-width: 700px) {{
+  .block-container {{ padding-left: .8rem; padding-right: .8rem; padding-top: 4rem; }}
+  .st-key-kpi_overview, .st-key-kpi_pair, .st-key-kpi_fund, .st-key-kpi_book,
+  [class*="st-key-kpi"] {{ grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: .5rem !important; }}
+  [data-testid="stMetric"] {{ min-height: 0; padding: 8px 10px 6px 10px; }}
+  [data-testid="stMetricValue"] {{ font-size: 1.15rem; }}
+  [data-testid="stMetricValue"] > div {{ overflow: visible !important; text-overflow: clip !important; }}
+  .desk-title {{ font-size: 1.15rem; }}
+  .perf-head {{ grid-template-columns: repeat(2, 1fr); }}
+  .perf-head .ph {{ padding: 9px 12px; border-left: none; border-top: 1px solid {BORDER}; }}
+  .perf-head .ph:first-child {{ grid-column: 1 / -1; border-top: none; }}
+  .perf-head .ph.main b {{ font-size: 1.6rem; }}
+  .perf-head b {{ font-size: 1.1rem; }}
+  .strip {{ gap: 4px 12px; padding: 7px 10px; font-size: .8rem; }}
+  #cp-watchdog {{ right: 48px; font-size: .7rem; max-width: calc(100vw - 110px); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }}
+  [data-testid="stHorizontalBlock"] {{ gap: .6rem; }}
+}}
 /* Position card: equity on a scale from the catastrophe stop to above the entry equity */
 .riskbar {{ position: relative; height: 24px; background: {PANEL_2}; border: 1px solid {BORDER}; border-radius: 6px;
   margin: 12px 0 26px 0; }}

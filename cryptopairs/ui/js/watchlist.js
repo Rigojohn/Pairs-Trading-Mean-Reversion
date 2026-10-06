@@ -18,27 +18,65 @@ function cpWlRow(r, focus) {
     + `<span class="wl-pnl ${pcls}">${isFinite(pnl) ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—"}</span></div>`;
 }
 
-// A click sent while the app is still running (a first load can take 10-40 s) is dropped by
-// Streamlit, and sending it again then restarts the run, so the page would never finish. The
-// click therefore waits until the app is idle, is sent once, and only if that pair's desk is
-// still not on screen 20 s later is it sent again (at most 3 times). A shorter wait is harmful: a page run takes 5-10 s on the server,
-// and every re-send restarts it, so the page never finishes.
+// The click goes out at once through the relay component (js/relay.js), which sits outside the fragment that
+// redraws this list: its trigger interrupts a running page instead of being dropped. If the desk of that pair
+// is still not on screen 12 s later the click is sent again (at most 3 times).
 function cpWlDelivered(el) {
   return el._focus === el._pending && /\/pair\/?$/.test(location.pathname);
 }
 
 function cpWlFlush(el) {
   if (!el._pending) return;
-  if (cpWlDelivered(el) || (el._tries >= 3 && Date.now() - el._sent > 20000) || Date.now() - el._since > 90000) { el._pending = null; return; }
-  const running = !!document.querySelector('[data-testid="stStatusWidget"]');
-  if (!running) el._idle = true;
-  // only the first load must not be interrupted. The live refresh keeps the app "running" almost all
-  // the time, so once the list has been redrawn a few times (the app answers) the click goes out anyway
-  if (running && !el._idle && !(el._renders >= 3)) return;
-  if (el._tries >= 3 || (el._sent && Date.now() - el._sent < 20000)) return;  // give the last one time to land
+  if (cpWlDelivered(el) || el._tries >= 3 || Date.now() - el._since > 60000) { el._pending = null; return; }
+  if (el._sent && Date.now() - el._sent < 12000) return;  // give the last one time to land
   el._tries += 1;
   el._sent = Date.now();
-  el._send("pick", el._pending);
+  (window.__cpPick || el._send.bind(null, "pick"))(el._pending);
+}
+
+// A click shows at once that it was taken: a thin bar and the pair's name at the top, and the old desk dimmed
+// (its numbers belong to the previous pair). Both go when the new pair's desk is drawn (its order book is the
+// last part of the desk), or after 20 s whatever happens.
+function cpWlLoading(id, label) {
+  let bar = document.getElementById("cp-loading");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "cp-loading";
+    bar.innerHTML = "<i></i><span></span>";
+    document.body.appendChild(bar);
+  }
+  bar.querySelector("span").textContent = "Loading " + label + "…";
+  bar.dataset.id = id;
+  bar.dataset.since = String(Date.now());
+  bar.classList.add("on");
+  // On the Pair desk the live panels switch at once (cpWlSwitchNow): only the rest is dimmed
+  document.body.classList.add(/\/pair\/?$/.test(location.pathname) ? "cp-switching-desk" : "cp-switching");
+  if (!window.__cpLoadingTimer) {
+    window.__cpLoadingTimer = setInterval(() => {
+      const b = document.getElementById("cp-loading");
+      const done = !b || !b.classList.contains("on")
+        || document.querySelector(".st-key-pd_book_" + CSS.escape(b.dataset.id))
+        || Date.now() - Number(b.dataset.since) > 20000;
+      if (!done) return;
+      if (b && b.classList.contains("on") && !document.querySelector(".st-key-pd_book_" + CSS.escape(b.dataset.id))) {
+        window.dispatchEvent(new CustomEvent("cp-pair-cancel"));
+      }
+      if (b) b.classList.remove("on");
+      document.body.classList.remove("cp-switching", "cp-switching-desk");
+      clearInterval(window.__cpLoadingTimer);
+      window.__cpLoadingTimer = null;
+    }, 80);
+  }
+}
+
+// The Pair desk's live panels and its title switch in the browser at once (js/market.js listens for
+// "cp-pair"); the bot's numbers and the chart follow with the page run.
+function cpWlSwitchNow(id) {
+  const md = (window.__cpMd || {})[id];
+  if (!md || !/\/pair\/?$/.test(location.pathname)) return;
+  window.dispatchEvent(new CustomEvent("cp-pair", { detail: md }));
+  const t = document.querySelector('[data-testid="stMain"] .desk-title');
+  if (t) t.textContent = md.label_a + " / " + md.label_b;
 }
 
 // On a phone the sidebar is an overlay that covers the page: close it so the opened desk is visible.
@@ -71,6 +109,9 @@ export default function (component) {
       el.querySelectorAll(".wl-row.on").forEach((x) => x.classList.remove("on"));
       const row = [...el.querySelectorAll(".wl-row")].find((x) => x.dataset.id === d.id);
       if (row) row.classList.add("on");  // instant feedback; the page follows after the rerun
+      const name = row && row.querySelector(".wl-name");
+      cpWlLoading(d.id, name ? name.textContent.replace(/[❚✎⟳⚑]/g, "").replace("/", " / ") : d.id);
+      cpWlSwitchNow(d.id);
       el._pending = d.id;
       el._tries = 0;
       el._sent = 0;
@@ -79,6 +120,13 @@ export default function (component) {
       cpWlCloseSidebar();
     };
     document.addEventListener("pointerup", up, true);
+    // A click anywhere else (a timeframe, a tab) cancels a pick still waiting to be re-sent: a late re-send
+    // would switch the pair under the user's hands.
+    const elsewhere = (ev) => {
+      if (!el.isConnected) { document.removeEventListener("pointerdown", elsewhere, true); return; }
+      if (!el.contains(ev.target)) el._pending = null;
+    };
+    document.addEventListener("pointerdown", elsewhere, true);
     el.addEventListener("pointercancel", () => { el._down = null; });
     el._timer = setInterval(() => {
       if (!el.isConnected) { clearInterval(el._timer); return; }  // a rebuilt sidebar has its own list

@@ -3,6 +3,7 @@ KPI rows and the status strip."""
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,8 @@ from cryptopairs.runtime.store import submit_command
 from cryptopairs.ui import data as D
 from cryptopairs.ui import fund as F
 from cryptopairs.ui import live as LIVE
+from cryptopairs.ui import market as M
+from cryptopairs.ui import pulse as PU
 from cryptopairs.ui import tv as TV
 from cryptopairs.ui.lab import DELTAS, LOOKBACKS, WhatIf, calibrated, in_use
 from cryptopairs.ui.theme import pill, signed
@@ -56,6 +59,22 @@ class Ctx:
     def what_if_for(self, pair_id: str) -> WhatIf:
         """The what-if panel's applied parameters, or the live ones when nothing was recalculated."""
         return self.what_if.get(pair_id) or self.live_params(pair_id)
+
+
+# Smart live refresh: a live fragment reruns when the bot has written new data (pulse, checked every
+# ``refresh`` seconds in the browser), and at least every FALLBACK_S so clocks and "bot down" ages move.
+FALLBACK_S = 15
+
+
+def every(refresh: int) -> int | None:
+    """``run_every`` of a live fragment (None when the live update is off)."""
+    return max(int(refresh), FALLBACK_S) if refresh else None
+
+
+def pulse(db_path: Path, refresh: int, key: str) -> None:
+    """Put at the top of a live fragment: reruns it as soon as the bot writes (see ui/pulse.py)."""
+    if refresh:
+        TV.pulse(key, PU.url(db_path), int(refresh) * 1000, D.version(db_path))
 
 
 def context() -> Ctx:
@@ -104,7 +123,12 @@ def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, d
         ids = [p["id"] for p in brief["pairs"]]
         ordered = sorted(brief["pairs"], key=lambda p: (p["side"] == 0, p["id"]))
         labels = {p["id"]: _pair_label(p, overrides) for p in brief["pairs"]}
-        pick = st.session_state.pop("_focus_pick", None)  # a click in the watchlist (previous run)
+        # A click in the watchlist, sent outside the fragment (js/relay.js). The relay also carries every
+        # pair's live-panel data; it is sent again only on a full run (a click, a page), not every second.
+        clicked = TV.pick_relay(market_data(D.load_pair_states(str(db_path), D.version(db_path))))
+        if clicked:
+            st.session_state["_open_desk"] = True
+        pick = clicked or st.session_state.pop("_focus_pick", None)  # or a fallback click from the fragment
         if pick in ids:
             st.session_state["focus"] = pick
         elif st.session_state.get("focus") not in ids:
@@ -134,6 +158,21 @@ def sidebar(state_dir: Path, log_dir: Path, config_path: Path, data_dir: Path, d
     )
 
 
+def market_data(pairs: pd.DataFrame) -> dict[str, dict]:
+    """Per pair, what the Pair desk's live panels need (desk.PairState.market_data): a click in the
+    watchlist hands it to them at once, so the ticker, books and tape switch before the page reruns.
+    ``pairs``: data.load_pair_states."""
+    out = {}
+    for r in pairs.itertuples():
+        strat, book = json.loads(r.strategy), json.loads(r.book)
+        id_a, dg_a = M.leg_meta(r.symbol_a)
+        id_b, dg_b = M.leg_meta(r.symbol_b)
+        out[r.pair_id] = {"pid": r.pair_id, "a": id_a, "b": id_b, "label_a": r.symbol_a.split("/")[0],
+                          "label_b": r.symbol_b.split("/")[0], "digits_a": dg_a, "digits_b": dg_b,
+                          "fit": D.fit_of(strat), "position": D.position_of(strat, book), "z_entry": float(r.z_entry)}
+    return out
+
+
 def watchlist_rows(rows: pd.DataFrame, pending: set[str]) -> list[dict]:
     """Rows for the sidebar watchlist: open positions by PnL, then flat pairs nearest to a signal."""
     num = lambda v: float(v) if v is not None and np.isfinite(v) else None  # noqa: E731
@@ -149,8 +188,9 @@ def watchlist_rows(rows: pd.DataFrame, pending: set[str]) -> list[dict]:
 
 
 def _watchlist(db_path: Path, since_ms: int, refresh: int, focus: str) -> None:
-    @st.fragment(run_every=refresh or None)
+    @st.fragment(run_every=every(refresh))
     def watch() -> None:
+        pulse(db_path, refresh, "pulse_watchlist")
         d = D.load_core(str(db_path), D.version(db_path), since_ms)
         if d["pairs"].empty:
             return

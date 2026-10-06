@@ -11,19 +11,30 @@ one-year window), so the join has no jump.
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from cryptopairs.core.signals import estimate_fits
 from cryptopairs.ui import lab as L
+from cryptopairs.ui import market as M
 from cryptopairs.ui import tvcharts as TC
+
+log = logging.getLogger(__name__)
+# The warm-up calls cached functions from its own threads; Streamlit logs "missing ScriptRunContext" for
+# every such call, which is expected here and would flood the log.
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
 
 FIT_COLS = ["bar_ts", "pair_id", "kf_alpha", "kf_beta", "kf_sigma", "used_alpha", "used_beta", "used_sigma",
             "spread_u", "z", "log_a", "log_b"]
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Loading the spread's history…", max_entries=24)
+@st.cache_data(ttl=6 * 3600, show_spinner="Loading the spread's history…", max_entries=64)
 def model_history(data_dir: str, sym_a: str, sym_b: str, pair_id: str, lookback: int, delta: float | None,
                   history: int | None, outlier_z: float | None, max_skips: int) -> pd.DataFrame:
     """Model rows (same columns as ``fit_history``) for every bar of the archive + recent Binance bars.
@@ -68,3 +79,43 @@ def extend(fit: pd.DataFrame | None, px: pd.DataFrame | None, hist: pd.DataFrame
     if not old_px.empty:
         px = pd.concat([old_px, px[["ts", "a", "b"]]], ignore_index=True)
     return fit, px.sort_values("ts", ignore_index=True)
+
+
+_WARM: dict = {"sig": None, "at": 0.0, "busy": False}
+WARM_EVERY_S = 3600
+
+
+def warm(data_dir: str, jobs: list[tuple], candle_limit: int) -> None:
+    """Load every pair's data in the background, so the first click on a pair finds it in memory.
+
+    ``jobs``: (pair_id, sym_a, sym_b, model_args or None) in priority order (open positions first).
+    Per pair: the 1h candles of both legs and the Binance bars after the archive (all pairs), and the
+    whole Spread Z history (``model_history(data_dir, sym_a, sym_b, pair_id, *model_args)``) where
+    ``model_args`` is given. Four pairs at a time, at most once an hour (mostly waiting for Binance)."""
+    sig = (data_dir, tuple(j[0] for j in jobs), candle_limit)
+    if _WARM["busy"] or (_WARM["sig"] == sig and time.time() - _WARM["at"] < WARM_EVERY_S):
+        return
+    _WARM.update(busy=True, sig=sig, at=time.time())
+
+    def one(job: tuple) -> None:
+        pid, sym_a, sym_b, model_args = job
+        try:
+            M.candles(sym_a, "1h", candle_limit)
+            M.candles(sym_b, "1h", candle_limit)
+            if model_args is not None:
+                model_history(data_dir, sym_a, sym_b, pid, *model_args)
+            else:
+                L.pair_history(data_dir, sym_a, sym_b, True)
+        except Exception as exc:
+            log.warning("warm-up of %s failed: %s", pid, exc)
+
+    def work() -> None:
+        t0 = time.time()
+        try:  # 4 at a time: most of it is waiting for Binance
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="warm-up") as pool:
+                list(pool.map(one, jobs))
+            log.info("warm-up of %d pairs done in %.0f s", len(jobs), time.time() - t0)
+        finally:
+            _WARM["busy"] = False
+
+    threading.Thread(target=work, daemon=True, name="warm-up").start()

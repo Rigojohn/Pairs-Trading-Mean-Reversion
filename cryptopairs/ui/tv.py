@@ -95,6 +95,7 @@ CSS = """
 .wl-bar i { position: absolute; left: 0; top: 0; bottom: 0; background: #a78bfa; border-radius: 2px; }
 .wl-bar u { position: absolute; top: -2px; width: 1px; height: 6px; background: #f6465d; }
 .wl-pnl { text-align: right; } .wl-pnl.pos { color: #2ebd85; } .wl-pnl.neg { color: #f6465d; }
+@media (pointer: coarse) { .wl-row { padding: 10px 6px; font-size: 14px; } .wl-h { padding-top: 14px; } }
 .wl-empty { color: #4b5468; padding: 2px 8px; }
 .wl-foot { color: #4b5468; font-size: 10.5px; line-height: 1.45; margin: 10px 2px 0 2px; }
 """
@@ -135,8 +136,22 @@ def chart(spec: dict, key: str, rev: str | None = None) -> None:
 def watchlist(rows: list[dict], focus: str | None, key: str = "watchlist") -> str | None:
     """The sidebar's pair list; returns the pair just clicked (None otherwise)."""
     res = _renderer("watchlist")(key=key, data={"rows": rows, "focus": focus}, on_pick_change=lambda: None,
-                                 width="stretch")
+                                 width="stretch")  # clicks normally go through pick_relay; this is the fallback
     return getattr(res, "pick", None)
+
+
+def pick_relay(md: dict | None = None, key: str = "pick_relay") -> str | None:
+    """Receives the watchlist's clicks (js/relay.js); mount it outside any fragment. Returns the pair clicked.
+    ``md``: per pair, the live panels' data, so a click switches them in the browser at once."""
+    res = _renderer("relay")(key=key, data={"md": md or {}}, on_pick_change=lambda: None, width="content")
+    return getattr(res, "pick", None)
+
+
+def pulse(key: str, url: str, every_ms: int, version: float) -> None:
+    """Smart live refresh (js/pulse.js): reruns the fragment it sits in when the bot's database is newer
+    than ``version`` (the one the fragment was drawn with); checked every ``every_ms``."""
+    _renderer("pulse")(key=key, data={"url": url, "every_ms": int(every_ms), "v": float(version)},
+                       on_tick_change=lambda: None, width="content")
 
 
 def market(view: str, key: str, **data) -> None:

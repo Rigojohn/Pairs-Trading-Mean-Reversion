@@ -64,6 +64,15 @@ VARIANTS: dict[str, dict] = {
     "W1 adaptive: 95th pct of |Z| over 30d": {"strategy": {"estimator": "kalman", "entry_rule": "rolling_quantile"},
                                               "research": {"fixed_z_exit": 0.0},
                                               "calibrate_with": {"estimator": "kalman"}},
+    # F1/F2: close a position whose funding over the next 8 h outweighs what it earns (F1), or a winner
+    # whose funding outweighs the cost of closing (F2, the user's rule). Same pairs, thresholds and
+    # delta as K1; only the exit changes. Rates: trailing 48 h (the funding of OGN/YFI moved in days).
+    "F1 funding exit: expected earnings vs funding": {
+        "strategy": {"estimator": "kalman", "funding_exit": "edge", "funding_lookback_hours": 48},
+        "calibrate_with": {"estimator": "kalman"}},
+    "F2 funding exit: winners only": {
+        "strategy": {"estimator": "kalman", "funding_exit": "profit_only", "funding_lookback_hours": 48},
+        "calibrate_with": {"estimator": "kalman"}},
 }
 
 # Informational only (never used to choose): the 2025-10-10/11 liquidation cascade.
@@ -82,6 +91,7 @@ def _diagnostics(res) -> dict:
         "MedianHoldH": float(pd.Series(hours).median()) if hours else float("nan"),
         "SignalExit%": 100.0 * sum(t["reason"] == "signal" for t in closed) / len(closed) if closed else float("nan"),
         "MedianAbsZEntry": float(pd.Series([abs(t["z_entry"]) for t in trades]).median()) if trades else float("nan"),
+        "FundingExit%": 100.0 * sum(t["reason"] == "funding_exit" for t in closed) / len(closed) if closed else float("nan"),
         "Stops%": 100.0 * sum(str(t["reason"]).startswith("stop") for t in closed) / len(closed) if closed else float("nan"),
         "RetExCrash": float((1 + rets).prod() - 1),
     }
@@ -164,7 +174,7 @@ def summary(df: pd.DataFrame) -> str:
         lines.append(f"{v:40s} | {r[('Sharpe', 'validation')]:7.2f} {100 * r[('TotalRet', 'validation')]:+8.1f}% "
                      f"{100 * r[('MaxDD', 'validation')]:+8.1f}% | {r[('Sharpe', 'test')]:7.2f} "
                      f"{100 * r[('TotalRet', 'test')]:+8.1f}% {100 * r[('MaxDD', 'test')]:+8.1f}%{mark}")
-    cols = [c for c in ("Trades", "MedianHoldH", "SignalExit%", "Stops%", "MedianAbsZEntry", "RetExCrash") if c in df]
+    cols = [c for c in ("Trades", "MedianHoldH", "SignalExit%", "Stops%", "FundingExit%", "MedianAbsZEntry", "RetExCrash") if c in df]
     diag = df.set_index(["variant", "stage"])[cols]
     lines += ["", "Diagnostics (trades, median hold in hours, % signal exits, % stop exits, median |Z| at entry, "
               "return excluding 2025-10-10/11 - informational only):", diag.round(2).to_string()]

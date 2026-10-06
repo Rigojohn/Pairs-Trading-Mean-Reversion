@@ -28,8 +28,9 @@ def _level_color(v: str) -> str:
             "WARNING": f"color: {AMBER}", "DEBUG": f"color: {MUTED}"}.get(v, "")
 
 
-@st.fragment(run_every=ctx.refresh or None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def live() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_logs_live")
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if not d["pairs"].empty:
         rows = D.pair_rows(d, D.session_cfg(d))

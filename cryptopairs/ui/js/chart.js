@@ -249,7 +249,10 @@ export default function (component) {
     });
   }
   st.box.style.height = ((data.spec && data.spec.height) || 420) + "px";
-  cpLWC().then((LWC) => cpRender(LWC, st, data)).catch((err) => {
+  cpLWC().then((LWC) => {
+    cpRender(LWC, st, data);
+    st.wrap.dataset.rev = data.rev || "";  // what the chart shows now (pair-view-timeframe), for checks
+  }).catch((err) => {
     st.status.textContent = "Chart library could not be loaded (" + err.message + ").";
   });
   return () => {

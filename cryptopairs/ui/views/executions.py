@@ -12,8 +12,9 @@ ctx = W.context()
 page_title("Execution quality", "Every open/close the bot executed: how much was filled as maker, what it cost vs mid")
 
 
-@st.fragment(run_every=ctx.refresh or None)
+@st.fragment(run_every=W.every(ctx.refresh))
 def live() -> None:
+    W.pulse(ctx.db_path, ctx.refresh, "pulse_executions_live")
     d = D.load_core(str(ctx.db_path), D.version(ctx.db_path), ctx.since_ms)
     if d["pairs"].empty:
         st.info("The bot has not saved any pair yet.")

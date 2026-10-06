@@ -134,7 +134,8 @@ def run_backtest(
         out[n_f - 1 :] = (c[n_f:] - c[:-n_f]) / n_f
         return out.tolist()
     use_ff = cfg.funding_filter != "off"
-    fra, frb = (trailing(data.funding_a), trailing(data.funding_b)) if use_ff else (None, None)
+    use_fx = cfg.funding_exit != "off" and use_funding
+    fra, frb = (trailing(data.funding_a), trailing(data.funding_b)) if use_ff or use_fx else (None, None)
     al, be, si = alpha.tolist(), beta.tolist(), sigma.tolist()
     data_ends_early = int(data.ts[-1]) < end_ms and i1 == len(data) - 1
 
@@ -180,7 +181,7 @@ def run_backtest(
         book.open(sa, sb, fla, flb, fee_paid)
         eq = book.equity(pa, pb)
         hl = math.nan
-        if cfg.time_stop_halflives is not None:
+        if cfg.time_stop_halflives is not None or cfg.funding_exit == "edge":
             lo = max(0, i - L + 1)
             hl = ou_half_life(data.log_a[lo : i + 1] - f.alpha - f.beta * data.log_b[lo : i + 1])
         strat.on_opened(side, ts_l[i], i, eq, zb, zs, hl)
@@ -262,6 +263,8 @@ def run_backtest(
             else:
                 zb, zs = strat.z_scores(la[i] + lbid, la[i] + lask, lb[i] + lbid, lb[i] + lask)
                 reason = strat.check_exit(ts, i, eq, zb, zs)
+                if reason is None and use_fx and strat.check_funding_exit(eq, zb, zs, fra[i], frb[i]):
+                    reason = "funding_exit"
                 if reason is None and data_ends_early and i == i1:
                     reason = "data_end"
                 if reason is not None:

@@ -126,6 +126,7 @@ def load_core(db_path: str, version: float, since_ms: int) -> dict[str, pd.DataF
         "kv": q("SELECT * FROM kv"),
         "commands": q("SELECT * FROM commands ORDER BY id DESC LIMIT 200"),
         "heartbeat": q("SELECT MAX(ts) AS ts FROM equity_live"),
+        "_key": (db_path, version, since_ms),  # lets pair_rows reuse its result for the same data
     }
 
 
@@ -205,6 +206,12 @@ def load_pair(db_path: str, version: float, pair_id: str, since_ms: int) -> dict
     }
 
 
+@st.cache_data(ttl=5, show_spinner=False, max_entries=4)
+def load_pair_states(db_path: str, version: float) -> pd.DataFrame:
+    """The pairs' rows with their strategy and book snapshots (the live panels' data per pair)."""
+    return query(db_path, "SELECT pair_id, symbol_a, symbol_b, z_entry, strategy, book FROM pair_state ORDER BY pair_id")
+
+
 @st.cache_data(ttl=10, show_spinner=False, max_entries=4)
 def load_brief(db_path: str, version: float) -> dict:
     """What the sidebar needs: pairs with their side and parameters, profile, overrides."""
@@ -228,6 +235,22 @@ def load_brief(db_path: str, version: float) -> dict:
             pass
     out["overrides"] = kv_dict({"kv": kv}).get("param_overrides") or {}
     return out
+
+
+def fit_of(strat: dict) -> dict | None:
+    """The fit a pair trades on (its strategy snapshot), as the browser's live Z needs it."""
+    if strat.get("beta") is None or not strat.get("sigma"):
+        return None
+    return {"alpha": float(strat["alpha"]), "beta": float(strat["beta"]), "sigma": float(strat["sigma"])}
+
+
+def position_of(strat: dict, book: dict) -> dict | None:
+    """What the browser needs for the live PnL ticker (None when flat)."""
+    side = int(strat.get("side", 0))
+    if not side:
+        return None
+    return {"side": side, "qty_a": book["qty_a"], "qty_b": book["qty_b"], "entry_a": book["entry_px_a"],
+            "entry_b": book["entry_px_b"], "cash": book["cash"], "entry_equity": strat.get("entry_equity")}
 
 
 def kv_dict(d: dict) -> dict:
@@ -286,7 +309,24 @@ def performance(d: dict, curve: pd.Series) -> dict:
 
 
 def pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
-    """One row per pair: position, legs, live PnL, Z, distances to exit and stops."""
+    """One row per pair: position, legs, live PnL, Z, distances to exit and stops.
+
+    Computed once per database version: a page run asked for it up to 5 times (~0.7 s), and
+    the live refresh asks again every second."""
+    strat_cfg = cfg.get("strategy", {}) or {}
+    if d.get("_key"):
+        return _pair_rows_cached(*d["_key"], strat_cfg.get("stop_loss_pct"), strat_cfg.get("catastrophe_stop_pct"))
+    return _pair_rows(d, cfg)
+
+
+@st.cache_data(ttl=10, show_spinner=False, max_entries=16)
+def _pair_rows_cached(db_path: str, version: float, since_ms: int, stop, cat) -> pd.DataFrame:
+    d = dict(load_core(db_path, version, since_ms))
+    d.pop("_key", None)
+    return _pair_rows(d, {"strategy": {"stop_loss_pct": stop, "catastrophe_stop_pct": cat}})
+
+
+def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
     strat_cfg = cfg.get("strategy", {}) or {}
     stop_cfg = strat_cfg.get("stop_loss_pct") or 0.0
     cat_pct = strat_cfg.get("catastrophe_stop_pct")
@@ -418,6 +458,71 @@ def trade_view(t: pd.DataFrame) -> pd.DataFrame:
         "Z entry": t["z_entry"], "beta": t["beta"], "reason": t["reason"].fillna("open"),
         "PnL": t["pnl"], "PnL %": 100 * t["pnl"] / t["equity_before"], "fees": -t["fees"], "funding": -t["funding"],
     })
+
+
+EXIT_LABEL = {"signal": "exit signal · hourly", "realtime": "exit signal · instant", "stop_loss": "stop-loss",
+              "catastrophe": "catastrophe stop", "time_stop": "time stop", "manual_close": "manual", "manual": "manual"}
+
+
+def journal(d: dict, rows: pd.DataFrame, realtime: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Every trade of the bot, newest first, for the Journal page.
+
+    Closed: PnL with fees and funding (+ received, − paid), the Z at the exit (exit prices under the
+    position's own fit) and why it closed (an exit between bar closes is the bot's instant exit, from its
+    ``realtime_exit`` event; ``realtime``: those events, ts and pair_id, else the recent ones in ``d``).
+    Open: the live unrealized PnL and the Z now."""
+    t = d["trades"]
+    cols = ["id", "pair", "side", "status", "origin", "entry", "exit", "hours", "Z entry", "Z exit / now", "exit reason",
+            "PnL", "PnL %", "fees", "funding", "entry_day"]
+    if t is None or t.empty:
+        return pd.DataFrame(columns=cols)
+    t = t.copy()
+    num = ["entry_ts", "exit_ts", "pnl", "fees", "funding", "z_entry", "alpha", "beta", "sigma", "exit_px_a", "exit_px_b",
+           "equity_before"]
+    for c in num:
+        t[c] = pd.to_numeric(t[c], errors="coerce")
+    ev = d.get("events")
+    if realtime is not None:
+        rt = realtime
+    else:
+        rt = ev[ev["kind"] == "realtime_exit"] if ev is not None and not ev.empty and "kind" in ev else pd.DataFrame()
+    live = rows.set_index("pair") if rows is not None and len(rows) else pd.DataFrame()
+    now = now_ms()
+    out = []
+    for r in t.itertuples():
+        entry = event_ms(r.entry_ts)
+        closed = pd.notna(r.exit_ts)
+        exit_ = event_ms(r.exit_ts) if closed else None
+        origin = r.entry_reason if isinstance(getattr(r, "entry_reason", None), str) else "signal"
+        if closed:
+            reason = r.reason if isinstance(r.reason, str) else "signal"
+            if reason == "signal" and len(rt) and (
+                    (rt["pair_id"] == r.pair_id) & ((rt["ts"] - exit_).abs() <= 10 * 60_000)).any():
+                reason = "realtime"
+            z_out = np.nan
+            if r.sigma and r.sigma > 0 and r.exit_px_a > 0 and r.exit_px_b > 0:
+                z_out = (math.log(r.exit_px_a) - r.alpha - r.beta * math.log(r.exit_px_b)) / r.sigma
+            # rounded to the μUSDT and + 0.0: a tiny amount never shows as "-0.0000"
+            pnl, fees, funding = (round(float(x), 6) + 0.0 for x in (r.pnl, -r.fees, -r.funding))
+            label = EXIT_LABEL.get(reason, str(reason).replace("_", " "))
+        else:
+            lr = live.loc[r.pair_id] if r.pair_id in live.index else None
+            pnl = float(lr["unrealized"]) if lr is not None and int(lr["side"]) == int(r.side) else np.nan
+            z_out = float(lr["Z now"]) if lr is not None else np.nan
+            fees, funding, label = (-r.fees if pd.notna(r.fees) else np.nan), np.nan, "open"
+        end = exit_ if closed else now
+        out.append({
+            "id": int(r.id), "pair": r.pair_id, "side": SIDE.get(int(r.side), "-"), "status": "closed" if closed else "open",
+            "origin": origin, "entry": entry, "exit": exit_, "hours": (end - entry) / HOUR, "Z entry": r.z_entry,
+            "Z exit / now": z_out, "exit reason": label, "PnL": pnl,
+            "PnL %": 100 * pnl / r.equity_before if r.equity_before and pd.notna(pnl) else np.nan,
+            "fees": fees, "funding": funding,
+        })
+    j = pd.DataFrame(out)
+    j["entry_day"] = to_time(j["entry"]).dt.date
+    j["entry"] = to_time(j["entry"])
+    j["exit"] = to_time(j["exit"].astype("float"))
+    return j.sort_values("entry", ascending=False, ignore_index=True)[cols]
 
 
 def z_at(ts_ms: int, fit: pd.DataFrame, live: pd.DataFrame) -> float:

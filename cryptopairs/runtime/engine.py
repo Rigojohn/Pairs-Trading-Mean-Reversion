@@ -656,9 +656,10 @@ class StrategyEngine:
         """Open a position now, on the trader's call instead of the Z signal (dashboard ticket).
 
         Sizing, lot rounding and the risk checks are those of an automatic entry, and from
-        then on the strategy manages the exit and the stops as usual. A pause or a cooldown
-        only stops automatic entries, so neither blocks this; a deactivated pair, a broken
-        fit or stale quotes do. ``execution``: "market", or "maker" (post-only first, as the
+        then on the strategy manages the exit and the stops as usual. A pause, a cooldown and
+        ``max_entry_z`` only stop automatic entries, so none blocks this (the trader saw the
+        prices: an extreme Z after news, OGN/SNX 2026-10-09); a deactivated pair, a broken fit
+        or stale quotes do. ``execution``: "market", or "maker" (post-only first, as the
         bot's own entries; worked in the background for up to the maker timeout).
         """
         if side not in (LONG, SHORT):
@@ -701,8 +702,7 @@ class StrategyEngine:
             z = zb if side == LONG else zs
             if not math.isfinite(z):
                 return False, "no valid Z right now"
-            if sc.max_entry_z is not None and abs(z) > sc.max_entry_z:
-                return False, f"|Z| {abs(z):.1f} is above max_entry_z {sc.max_entry_z:g}: the prices look broken"
+            extreme = sc.max_entry_z is not None and abs(z) > sc.max_entry_z
             order, why = self._open_order(pr, side, m, {}, 0, leverage=lev, reason="manual_open")
             if order is None:
                 return False, why
@@ -713,11 +713,12 @@ class StrategyEngine:
             pr.busy = True
             self.store.event("manual_open", s.id, side=side, leverage=lev, execution=execution, z=z,
                              with_signal=signal, paused=s.id in self.paused_pairs or self.entries_paused or self.coin_paused(s),
-                             cooldown=strat.cooldown_until > self.feed.now_ms())
+                             cooldown=strat.cooldown_until > self.feed.now_ms(), extreme_z=extreme)
         self._spawn(self._run(it))
         name = "LONG" if side == LONG else "SHORT"
         return True, (f"{name} spread submitted at Z {z:+.2f}, {lev:g}x, {self._how(execution)}"
-                      + ("" if signal else "; no entry signal now (manual call)"))
+                      + ("" if signal else "; no entry signal now (manual call)")
+                      + (f"; |Z| above {sc.max_entry_z:g}, where the bot itself does not enter" if extreme else ""))
 
     def _how(self, execution: str) -> str:
         if execution == "market":

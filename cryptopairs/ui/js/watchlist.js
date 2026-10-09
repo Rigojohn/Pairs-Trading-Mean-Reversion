@@ -150,7 +150,7 @@ function cpWlRender(el) {
   }
   el._list.innerHTML = html
     + '<div class="wl-foot">Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
-    + '❚❚ paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
+    + '❚❚ auto entries paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
 }
 
 // The search box: kept across the list's redraws (it is not part of the redrawn HTML), so typing is never lost.

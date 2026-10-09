@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,26 @@ def test_paused_pair_does_not_enter_but_still_exits(tmp_path):
     asyncio.run(go())
     store = StateStore(rig.db)
     assert store.kv_get("entries_paused") is True and store.kv_get("paused_pairs") == []
+
+
+def test_an_extreme_z_stops_automatic_entries_but_not_a_manual_order(tmp_path):
+    rig = Rig(tmp_path)
+
+    async def go():
+        eng, feed, store = rig.engine([spec()])
+        await feed.backfill()
+        rig.quote(feed)
+        eng.cfg.strategy.max_entry_z = 0.5  # every signal is "extreme" here
+        await rig.step(eng, feed, rig.bar)
+        assert eng.pairs[0].strat.side == FLAT  # the bot does not enter ...
+        ok, msg = await eng.open_pair("AAA_BBB", LONG)  # ... the trader may
+        assert ok and "above 0.5, where the bot itself does not enter" in msg
+        await eng.wait_background()
+        assert eng.pairs[0].strat.side == LONG
+        assert json.loads(store.query("SELECT payload FROM events WHERE kind='manual_open'")[0]["payload"])["extreme_z"]
+        store.close()
+
+    asyncio.run(go())
 
 
 def test_paused_coin_stops_automatic_entries_of_its_pairs_but_not_manual_orders(tmp_path):
@@ -366,7 +387,7 @@ def test_pause_by_coin_on_risk_and_controls(tmp_path, monkeypatch):
     assert not at.exception, at.exception
     assert at.selectbox(key="ctl_coin").value == "BBB"  # paused coins come first
     assert at.button(key="ctl_coin_resume").label == "Resume BBB"
-    assert "BBB paused" in at.dataframe[0].value["status"].iloc[0]
+    assert "BBB: auto entries paused" in at.dataframe[0].value["status"].iloc[0]
     at.button(key="ctl_coin_resume_BBB").click().run()
     assert [c["kind"] for c in store.pending_commands()][-1] == "resume_coin"
     at.switch_page("ui/views/pair.py").run()  # the Pair desk says why the bot will not enter
@@ -528,3 +549,19 @@ def test_live_lines_break_where_the_bot_was_down():
     out = _with_gaps(df)
     assert out["equity"].isna().sum() == 1 and out["ts"].is_monotonic_increasing
     assert out.loc[out["equity"].isna(), "ts"].item() == 99_999
+
+
+def test_a_manual_position_on_a_paused_pair_shows_as_open(tmp_path):
+    from cryptopairs.ui import data as D
+
+    rig = _populated(tmp_path)  # AAA_BBB holds an open long spread
+    con = sqlite3.connect(rig.db)
+    with con:
+        con.execute("UPDATE trades SET entry_reason = 'manual' WHERE exit_ts IS NULL")
+        con.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('paused_pairs', '[\"AAA_BBB\"]')")
+        con.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('paused_coins', '[\"BBB\"]')")
+    con.close()
+    d = D.load_core(str(rig.db), D.version(rig.db), 0)
+    r = D._pair_rows({k: v for k, v in d.items() if k != "_key"}, {}).iloc[0]
+    assert r["position"] == "LONG"
+    assert r["status"] == "manual position, auto entries paused, BBB: auto entries paused"

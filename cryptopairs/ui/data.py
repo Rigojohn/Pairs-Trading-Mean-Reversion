@@ -355,6 +355,8 @@ def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
         entry_eq = st_.get("entry_equity")
         t = trades[trades["pair_id"] == r.pair_id] if not trades.empty else trades
         closed = t[t["exit_ts"].notna()] if len(t) else t
+        live_trade = t[t["exit_ts"].isna()] if len(t) else t
+        manual = bool(len(live_trade)) and "entry_reason" in live_trade and (live_trade["entry_reason"] == "manual").any()
         qa, qb = float(book["qty_a"]), float(book["qty_b"])
         alpha, beta, sigma = st_.get("alpha"), st_.get("beta"), st_.get("sigma")
         spread_now = val("spread_u")
@@ -381,9 +383,11 @@ def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
             "realized": float(closed["pnl"].sum()) if len(closed) else 0.0,
             "funding": float(book.get("funding_paid", 0.0)), "fees": float(book.get("fees_paid", 0.0)),
             "override": r.pair_id in overrides, "paused": r.pair_id in paused, "coin paused": coins_off,
+            # A pause only stops the bot's own entries: a manual position next to it is open and managed.
             "status": ", ".join(x for x in (
-                "paused" if r.pair_id in paused else "",
-                f"{coins_off} paused" if coins_off else "",
+                "manual position" if side and manual else "",
+                "auto entries paused" if r.pair_id in paused else "",
+                f"{coins_off}: auto entries paused" if coins_off else "",
                 "deactivated" if st_.get("deactivated") else "",
                 "cooldown" if (st_.get("cooldown_until") or -1) > now else "",
                 "override" if r.pair_id in overrides else "",

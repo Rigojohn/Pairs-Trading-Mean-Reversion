@@ -28,6 +28,12 @@ SOLID, DOTTED, DASHED, LARGE_DASHED, SPARSE = 0, 1, 2, 3, 4
 TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 # Bars shown when a chart opens (the rest is a scroll away). 1d: the whole history at once.
 VISIBLE = {"1m": 360, "5m": 288, "15m": 192, "1h": 24 * 14, "4h": 180, "1d": 1300}
+# The NAV chart and the Spread Z open with one point every OPENING_PX pixels in every timeframe, as TradingView
+# does: a finer timeframe shows less time (1m is stretched), and a history too short to fill the width shows
+# whole. The Spread Z then keeps the width the user zoomed to when the timeframe or the pair changes.
+OPENING_PX = 6
+RIGHT_PX = 64  # room after the NAV's last point, so the latest closed trade's label is not cut off
+STACK = 4  # closed trades drawn on one NAV bar and side at most: beyond, the latest STACK - 1 and "+n more"
 INTRADAY = ("1m", "5m", "15m")
 
 
@@ -55,9 +61,10 @@ def _dedupe(t: np.ndarray, *cols: np.ndarray) -> tuple:
 def series(sid: str, kind: str, data: dict, pane: int = 0, options: dict | None = None, lines: list | None = None,
            markers: list | None = None, live: dict | None = None, legend: str | None = None, digits: int = 2,
            role: str | None = None, margins: tuple[float, float] | None = None,
-           include: list[float] | None = None) -> dict:
+           include: list[float] | None = None, boxes: list[dict] | None = None) -> dict:
     """One series. ``margins``: (top, bottom) share of the pane its price scale leaves empty;
-    ``include``: values its price scale always shows (levels drawn as price lines)."""
+    ``include``: values its price scale always shows (levels drawn as price lines);
+    ``boxes``: spans of time shaded behind it (``position_boxes``)."""
     s = {"id": sid, "type": kind, "pane": pane, "data": data, "options": options or {}, "digits": digits}
     if include:
         s["include"] = [float(x) for x in include]
@@ -67,6 +74,8 @@ def series(sid: str, kind: str, data: dict, pane: int = 0, options: dict | None 
         s["lines"] = lines
     if markers:
         s["markers"] = markers
+    if boxes:
+        s["boxes"] = boxes
     if live:
         s["live"] = live
     if legend:
@@ -122,8 +131,16 @@ def fill_z(t, px_a, px_b) -> float | None:
     return (math.log(pa) - a - b * math.log(pb)) / s
 
 
+def event_bar(ms: int, tf_sec: int, label: str) -> int:
+    """The bar (its time, s) a trade event is drawn on: its markers and its position box share it."""
+    real = event_ms(ms)
+    if label == "end" and tf_sec * 1000 < HOUR and int(ms) % HOUR == 0:
+        real += 1  # an hourly decision runs seconds after the close: the next intraday bar
+    return _label(real, tf_sec, label)
+
+
 def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: str = "start",
-                  reductions: list[int] | None = None, at_fill_z: bool = False) -> list[dict]:
+                  reductions: list | None = None, at_fill_z: bool = False) -> list[dict]:
     """Entry / close / stop markers of the bot's trades, placed on the bar where each happened.
 
     ``label``: "end" when a bar's time is its close (Z points), else its open. ``at_fill_z``
@@ -136,10 +153,7 @@ def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: s
     lo, hi = int(times[0]) - tf_sec, int(times[-1]) + tf_sec
 
     def bar(ms: int) -> int | None:
-        real = event_ms(ms)
-        if label == "end" and tf_sec * 1000 < HOUR and int(ms) % HOUR == 0:
-            real += 1  # an hourly decision runs seconds after the close: the next intraday bar
-        b = _label(real, tf_sec, label)
+        b = event_bar(ms, tf_sec, label)
         return _snap(times, b) if lo <= b <= hi else None
 
     out = []
@@ -168,10 +182,11 @@ def trade_markers(trades: pd.DataFrame, times: np.ndarray, tf_sec: int, label: s
                 if z is not None:
                     m.update(position="atPriceMiddle", price=z, text=f"{m['text']} @ {z:+.2f}")
                 out.append(m)
-    for ms in reductions or []:
+    for r in reductions or []:  # manual reductions / additions: a time, or (time, "REDUCE" | "ADD")
+        ms, text = (r, "REDUCE") if isinstance(r, (int, np.integer)) else r
         tm = bar(ms + 1 if int(ms) % HOUR == 0 else ms)  # always a real time
         if tm is not None:
-            out.append({"time": tm, "position": "inBar", "shape": "circle", "color": MUTED, "text": "REDUCE",
+            out.append({"time": tm, "position": "inBar", "shape": "circle", "color": MUTED, "text": text,
                         "size": 0.7})
     return sorted(out, key=lambda m: m["time"])
 
@@ -183,37 +198,17 @@ def last_entry_ms(trades: pd.DataFrame | None) -> int | None:
     return event_ms(int(trades["entry_ts"].max()))
 
 
-def position_spans(trades: pd.DataFrame, now_ms: int) -> list[tuple[int, int, int]]:
-    """(start ms, end ms, side) of every trade at the real times, the open one up to now."""
-    spans = []
+def position_boxes(trades: pd.DataFrame | None, tf_sec: int, label: str = "end") -> list[dict]:
+    """One box per trade behind the line (green long, red short; drawn by js/chart.js): from the bar of
+    its entry marker to the bar of its exit marker, ``to`` None while open (up to the latest point).
+    Every trade, also those before the bars sent: older history loaded later shows them."""
+    out = []
     for t in (trades.itertuples() if trades is not None and len(trades) else ()):
-        spans.append((event_ms(t.entry_ts), event_ms(t.exit_ts) if pd.notna(t.exit_ts) else now_ms, int(t.side)))
-    return spans
-
-
-def shade(times: np.ndarray, spans: list[tuple[int, int, int]], tf_sec: int, label: str, pane: int = 0) -> dict | None:
-    """Columns behind the bars held in a position (green long, red short)."""
-    times = np.asarray(times, dtype=np.int64)
-    if times.size == 0 or not spans:
-        return None
-    v = np.zeros(times.size)
-    c: list = [None] * times.size
-    for a, b, side in spans:
-        if label == "end":  # an observation at the bar's close, from the first close after the entry to the exit
-            m = (times * 1000 > a) & (times <= _label(b, tf_sec, "end"))
-        else:  # a bar that overlaps the position
-            m = ((times + tf_sec) * 1000 > a) & (times * 1000 <= b)
-        v[m] = 1.0
-        col = _rgba(GREEN if side > 0 else RED, 0.10)
-        for i in np.flatnonzero(m):
-            c[i] = col
-    if not v.any():
-        return None
-    data = {"t": [int(x) for x in times], "v": [float(x) if x else None for x in v], "c": c}
-    return series(f"shade{pane}", "Area", data, pane, role="shade", margins=(0.0, 0.0),
-                  options={"lineVisible": False, "lineWidth": 1, "lineColor": "rgba(0,0,0,0)",
-                           "topColor": _rgba(GREEN, 0.1), "bottomColor": _rgba(GREEN, 0.1),
-                           "crosshairMarkerVisible": False})
+        color = GREEN if int(t.side) > 0 else RED
+        out.append({"from": event_bar(t.entry_ts, tf_sec, label),
+                    "to": event_bar(int(t.exit_ts), tf_sec, label) if pd.notna(t.exit_ts) else None,
+                    "fill": _rgba(color, 0.10), "edge": _rgba(color, 0.45)})
+    return sorted(out, key=lambda b: b["from"])
 
 
 # ------------------------------------------------------------- spread Z
@@ -332,9 +327,9 @@ def _level_style(z: float, role: str, label: str, side: int = 0) -> tuple[str, i
 def z_spec(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, *, z_entry: float, z_exit: float,
            exit_plan: float | None = None, what_if: tuple[float, float] | None = None, max_entry_z: float | None = None,
            fit_now: dict | None = None, symbols: tuple[str, str] | None = None, now_ms: int, side: int = 0,
-           entered: float | None = None, reductions: list[int] | None = None, height: int = 560) -> dict:
+           entered: float | None = None, reductions: list | None = None, height: int = 560) -> dict:
     """The strategy's Z at every moment, with the levels it acts on (``z_levels``: both directions
-    while flat, the open position's own while ``side`` != 0), the trades and the position shaded;
+    while flat, the open position's own while ``side`` != 0), the trades and a box per position;
     the spread (% from fair value) with the same levels as bands below. ``px``: ``closes(...)`` at ``tf``
     (hourly and 4-hour fall back to the bot's model history). The last point follows Binance live."""
     tf_sec = TF_SECONDS[tf]
@@ -343,9 +338,6 @@ def z_spec(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, *
     h = z_points(px, fits_in_force(fit, trades, now_ms), tf, now_ms, fit_now)
     t = h["t"].to_numpy(dtype=np.int64)
     out: list[dict] = []
-    sp = shade(t, position_spans(trades, now_ms), tf_sec, "end")
-    if sp:
-        out.append(sp)
     levels = z_levels(side, z_entry, z_exit, exit_plan, entered)
     width = 2 if side else 1
     lines = []
@@ -367,7 +359,7 @@ def z_spec(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, *
                 "fit": {k: float(fit_now[k]) for k in ("alpha", "beta", "sigma")}}
     out.append(series("z", "Line", line_data(t, h["z"]), 0, lines=lines, legend="Z", include=[z for z, _, _ in levels],
                       markers=trade_markers(trades, t, tf_sec, "end", reductions, at_fill_z=True),
-                      live=dict(live, kind="z") if live else None,
+                      boxes=position_boxes(trades, tf_sec), live=dict(live, kind="z") if live else None,
                       options={"color": VIOLET, "lineWidth": 2, "priceFormat": price_format(2), "priceLineVisible": True,
                                "priceLineColor": VIOLET, "priceLineStyle": DOTTED}))
     # Pane 1: the spread in % (log A - alpha - beta log B) and its bands, z x sigma of the fit in force.
@@ -394,7 +386,7 @@ def z_spec(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, *
                       live=dict(live, kind="spread", scale=100.0) if live else None,
                       options={"color": TEXT, "lineWidth": 1, "priceFormat": pfmt, "priceLineVisible": False}))
     return {"height": height, "panes": [3, 1.3], "series": out, "seconds": False,
-            "visible_bars": VISIBLE.get(tf)}
+            "bar_px": OPENING_PX, "keep_zoom": True}
 
 
 # ---------------------------------------------------------------- legs
@@ -413,7 +405,7 @@ def _volume_data(df: pd.DataFrame) -> dict:
 
 def legs_spec(ca: pd.DataFrame | None, cb: pd.DataFrame | None, labels: tuple[str, str], ids: tuple[str, str],
               digits: tuple[int, int], tf: str, trades: pd.DataFrame, entry: tuple[float, float] | None,
-              side_a: int = 0, height: int = 520, reductions: list[int] | None = None) -> dict:
+              side_a: int = 0, height: int = 520, reductions: list | None = None) -> dict:
     """Candles of both legs, one pane each, with volume, the entry prices and the trades."""
     tf_sec = TF_SECONDS[tf]
     out = []
@@ -517,23 +509,32 @@ def performance_spec(grid: pd.DataFrame, *, capital: float, peak_before: float, 
     lines = [price_line(capital, MUTED, "capital", DOTTED)]
     if kill_level:
         lines.append(price_line(kill_level, RED, "kill switch", SPARSE))
-    marks = []
+    stacks: dict[tuple[int, str], list[tuple[int, float, str]]] = {}  # (bar, side) -> (exit ms, pnl, label)
     if trades is not None and len(trades) and t.size:
         closed = trades[trades["exit_ts"].notna()]
+        first_open = int(t[0] - (t[1] - t[0] if t.size > 1 else 0)) * 1000  # the first bar starts a bar before its label
         for r in closed.itertuples():
             ms = event_ms(int(r.exit_ts))
-            if not (t[0] * 1000 <= ms <= t[-1] * 1000 + 60_000):
+            if not (first_open < ms <= t[-1] * 1000 + 60_000):
                 continue
             pnl = float(r.pnl) if pd.notna(r.pnl) else 0.0
             name = (labels or {}).get(r.pair_id, r.pair_id)
-            marks.append({"time": _snap(t, int(math.ceil(ms / 1000))), "position": "aboveBar" if pnl > 0 else "belowBar",
-                          "shape": "circle", "color": GREEN if pnl > 0 else RED, "size": 0.8,
-                          "text": f"{name} {pnl:+.2f}"})
+            i = min(int(np.searchsorted(t, math.ceil(ms / 1000))), t.size - 1)  # the bar it closed in (labelled at its end)
+            stacks.setdefault((int(t[i]), "aboveBar" if pnl > 0 else "belowBar"), []).append((ms, pnl, f"{name} {pnl:+.2f}"))
+    marks = []
+    for (tm, pos), rows in stacks.items():
+        rows.sort(key=lambda x: x[0])
+        if len(rows) > STACK:  # the latest ones, and the rest summed up (a finer timeframe shows each)
+            rest, rows = rows[:len(rows) - STACK + 1], rows[len(rows) - STACK + 1:]
+            rows.append((0, sum(p for _, p, _ in rest), f"+{len(rest)} more {sum(p for _, p, _ in rest):+.2f}"))
+        marks += [{"time": tm, "position": pos, "shape": "circle", "color": GREEN if pos == "aboveBar" else RED,
+                   "size": 0.8, "text": text} for _, _, text in rows]
     nav = series("nav", "Baseline", line_data(t, v), 0, lines=lines, legend="NAV", markers=sorted(marks, key=lambda m: m["time"]),
                  options={"baseValue": {"type": "price", "price": base}, "lineWidth": 2, "lineType": 0,
                           "topLineColor": GREEN, "topFillColor1": _rgba(GREEN, 0.30), "topFillColor2": _rgba(GREEN, 0.03),
                           "bottomLineColor": RED, "bottomFillColor1": _rgba(RED, 0.03), "bottomFillColor2": _rgba(RED, 0.30),
                           "priceFormat": fmt, "color": GREEN, "priceLineVisible": True, "crosshairMarkerRadius": 4})
+    nav["marker_room"] = True  # pairs often close in the same bar, at a high: room for the whole stack (js/chart.js)
     hw = series("hwm", "Line", line_data(t, np.where(np.isfinite(v), hwm, np.nan)), 0, legend="high-water mark",
                 role="guide",
                 options={"color": _rgba(AMBER, 0.75), "lineWidth": 1, "lineStyle": DOTTED, "lineType": 1,
@@ -548,4 +549,5 @@ def performance_spec(grid: pd.DataFrame, *, capital: float, peak_before: float, 
                            "priceFormat": fmt, "invertFilledArea": True, "color": RED, "priceLineVisible": False},
                   margins=(0.08, 0.02))
     return {"height": height, "panes": [3, 1.25], "series": [nav, hw, draw], "right_offset": 1,
+            "right_px": RIGHT_PX, "bar_px": OPENING_PX, "fit": True,
             "seconds": bool(len(grid) > 1 and int(grid["t"].iloc[-1] - grid["t"].iloc[0]) <= 6 * HOUR)}

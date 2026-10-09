@@ -19,7 +19,7 @@ from cryptopairs.runtime.store import StateStore
 
 log = logging.getLogger(__name__)
 
-PAIR_COMMANDS = {"close_pair", "pause_pair", "resume_pair", "set_params", "clear_params", "open_pair",
+PAIR_COMMANDS = {"close_pair", "add_pair", "pause_pair", "resume_pair", "set_params", "clear_params", "open_pair",
                  "set_exit_plan"}
 
 
@@ -62,6 +62,13 @@ class CommandProcessor:
             except (TypeError, ValueError) as exc:
                 return False, f"invalid fraction: {exc}"
             return await self.engine.close_pair(pid, fraction=fraction, execution=str(p.get("execution", "market")))
+        if kind == "add_pair":
+            p = json.loads(cmd.get("payload") or "{}")
+            try:
+                fraction = float(p["fraction"])
+            except (KeyError, TypeError, ValueError) as exc:
+                return False, f"invalid addition: {exc}"
+            return await self.engine.add_pair(pid, fraction, str(p.get("execution", "market")))
         if kind == "open_pair":
             p = json.loads(cmd.get("payload") or "{}")
             try:
@@ -100,6 +107,17 @@ class CommandProcessor:
         if kind == "resume_entries":
             self.engine.set_entries_paused(False)
             return True, "entries allowed again"
+        if kind in ("pause_coin", "resume_coin"):
+            coin = str(json.loads(cmd.get("payload") or "{}").get("coin") or "").strip().upper()
+            n = self.engine.pairs_with_coin(coin)
+            if kind == "pause_coin":
+                if n == 0:
+                    return False, f"no pair trades {coin or 'that coin'}"
+                self.engine.set_coin_paused(coin, True)
+                return True, (f"no new automatic entries in the {n} pair(s) with {coin} "
+                              "(exits, stops and manual orders still run)")
+            self.engine.set_coin_paused(coin, False)
+            return True, f"automatic entries allowed again in the {n} pair(s) with {coin}"
         if kind == "reset_kill_switch":
             self.risk.kill_switch = False
             self.risk.peak_equity = None  # drawdown is measured afresh from now

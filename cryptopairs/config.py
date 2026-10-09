@@ -254,6 +254,9 @@ class RiskConfig:
     require_quotes_for_entry: bool = True
     # Highest leverage a manual entry from the dashboard may use; None = strategy.leverage.
     manual_max_leverage: float | None = None
+    # Highest leverage (gross / pair equity) a position may reach through manual additions
+    # from the dashboard; None = twice strategy.leverage.
+    manual_add_max_leverage: float | None = None
 
 
 @dataclass

@@ -61,6 +61,7 @@ risk:
   stop_check_seconds: 5
   require_quotes_for_entry: true
   manual_max_leverage: null        # cap for manual entries from the dashboard; null = strategy.leverage
+  manual_add_max_leverage: null    # cap for a position after manual additions; null = 2 x strategy.leverage
 
 runtime:
   mode: paper                      # live arrives in Phase 3

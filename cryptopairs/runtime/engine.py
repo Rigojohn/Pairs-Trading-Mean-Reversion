@@ -34,6 +34,11 @@ from cryptopairs.runtime.store import StateStore, StoredPair
 log = logging.getLogger(__name__)
 
 
+def coin_of(symbol: str) -> str:
+    """The coin a symbol trades: "OGN/USDT:USDT" -> "OGN" (as the dashboard names it)."""
+    return symbol.split("/")[0]
+
+
 @dataclass
 class PairSpec:
     id: str
@@ -118,6 +123,8 @@ class StrategyEngine:
         # Manual controls from the dashboard, persisted so they survive restarts.
         self.paused_pairs: set[str] = set(store.kv_get("paused_pairs", []) or [])
         self.entries_paused: bool = bool(store.kv_get("entries_paused", False))
+        # Coins whose pairs take no automatic entries (e.g. news or a pump on that coin).
+        self.paused_coins: set[str] = set(store.kv_get("paused_coins", []) or [])
         # Manual parameter overrides: {pair_id: {"params": {...}, "base": {...}, "ts": ms}}.
         # "base" is the calibration they replaced; a recalibrated pairs file supersedes them.
         self.overrides: dict[str, dict] = dict(store.kv_get("param_overrides", {}) or {})
@@ -280,7 +287,7 @@ class StrategyEngine:
             return None
         zb, zs = strat.z_scores(marks.log_bid_a, marks.log_ask_a, marks.log_bid_b, marks.log_ask_b)
         pr.last_z = (zb, zs)
-        if self.entries_paused or s.id in self.paused_pairs:
+        if self.entries_paused or s.id in self.paused_pairs or self.coin_paused(s):
             return None  # manual pause: no new entries (exits and stops still run)
         side = strat.check_entry(bar_ts, bar_index, zb, zs)
         if side == FLAT:
@@ -389,7 +396,7 @@ class StrategyEngine:
                 self.store.event("execution_imbalance", s.id, error=report.error,
                                  fills=[(f.symbol, f.qty, f.price) for f in traded])
                 log.error("%s: PARTIAL EXECUTION %s; manual check needed", s.id, traded)
-            kind = {"open": "entry_failed", "reduce": "reduce_failed"}.get(order.kind, "exit_failed")
+            kind = {"open": "entry_failed", "reduce": "reduce_failed", "add": "add_failed"}.get(order.kind, "exit_failed")
             self.store.event(kind, s.id, reason=order.reason, error=report.error)
             log.error("%s: %s (%s): %s", s.id, kind.upper(), order.reason, report.error)
             return False
@@ -399,6 +406,8 @@ class StrategyEngine:
             self.store.commit_open(order_id, report, pr)
         elif order.kind == "reduce":
             self._apply_reduce(pr, it.ts, report, order_id)
+        elif order.kind == "add":
+            self._apply_add(pr, report, order_id)
         else:
             self._apply_close(pr, order.reason, it.ts, report, order_id)
         if report.stats:  # diagnostics only: recorded after the fill is safely stored
@@ -453,6 +462,20 @@ class StrategyEngine:
                          remaining_a=book.qty_a, remaining_b=book.qty_b)
         log.info("%s: REDUCE qty=(%.6g, %.6g) realized=%.4f fee=%.4f, left (%.6g, %.6g)", s.id, qa, qb,
                  realized, report.fee, book.qty_a, book.qty_b)
+
+    def _apply_add(self, pr: PairRuntime, report: ExecutionReport, order_id: int) -> None:
+        """A manual addition: the position grows at the averaged entry prices; the stops stay in USDT."""
+        s, book = pr.spec, pr.book
+        qa, qb = report.qty(s.symbol_a), report.qty(s.symbol_b)
+        book.add(qa, qb, report.price(s.symbol_a), report.price(s.symbol_b), report.fee)
+        if pr.trade is not None:
+            pr.trade["fees"] = (pr.trade.get("fees") or 0.0) + report.fee
+        self.store.commit_reduce(order_id, report, pr)
+        self.store.event("position_added", s.id, traded_a=qa, traded_b=qb, fee=report.fee,
+                         px_a=report.price(s.symbol_a), px_b=report.price(s.symbol_b),
+                         total_a=book.qty_a, total_b=book.qty_b, entry_a=book.entry_px_a, entry_b=book.entry_px_b)
+        log.info("%s: ADD qty=(%.6g, %.6g) fee=%.4f, now (%.6g, %.6g) at entry (%.6g, %.6g)", s.id, qa, qb,
+                 report.fee, book.qty_a, book.qty_b, book.entry_px_a, book.entry_px_b)
 
     def _apply_close(self, pr: PairRuntime, reason: str, ts: int, report: ExecutionReport, order_id: int) -> None:
         s, strat, book = pr.spec, pr.strat, pr.book
@@ -614,6 +637,20 @@ class StrategyEngine:
         self.entries_paused = paused
         self.store.kv_set("entries_paused", paused)
 
+    def coin_paused(self, s: PairSpec) -> bool:
+        return coin_of(s.symbol_a) in self.paused_coins or coin_of(s.symbol_b) in self.paused_coins
+
+    def pairs_with_coin(self, coin: str) -> int:
+        return sum(1 for pr in self.pairs if coin in (coin_of(pr.spec.symbol_a), coin_of(pr.spec.symbol_b)))
+
+    def set_coin_paused(self, coin: str, paused: bool) -> None:
+        """Stop (or allow again) the automatic entries of every pair that trades ``coin``.
+
+        Like a pair pause: open positions keep their exits and stops, and manual orders still go.
+        """
+        (self.paused_coins.add if paused else self.paused_coins.discard)(coin)
+        self.store.kv_set("paused_coins", sorted(self.paused_coins))
+
     async def open_pair(self, pair_id: str, side: int, leverage: float | None = None,
                         execution: str = "market") -> tuple[bool, str]:
         """Open a position now, on the trader's call instead of the Z signal (dashboard ticket).
@@ -675,7 +712,7 @@ class StrategyEngine:
                         self._half_life(pr, window) if window is not None else math.nan, entry_reason="manual")
             pr.busy = True
             self.store.event("manual_open", s.id, side=side, leverage=lev, execution=execution, z=z,
-                             with_signal=signal, paused=s.id in self.paused_pairs or self.entries_paused,
+                             with_signal=signal, paused=s.id in self.paused_pairs or self.entries_paused or self.coin_paused(s),
                              cooldown=strat.cooldown_until > self.feed.now_ms())
         self._spawn(self._run(it))
         name = "LONG" if side == LONG else "SHORT"
@@ -705,6 +742,77 @@ class StrategyEngine:
             legs.append(-math.copysign(q, held))
         return PairOrder(s.id, "reduce", s.symbol_a, s.symbol_b, legs[0], legs[1], marks.mid_a, marks.mid_b,
                          "manual_reduce")
+
+    def add_leverage_cap(self) -> float:
+        """Highest gross / pair equity a position may reach through manual additions."""
+        cap = self.cfg.risk.manual_add_max_leverage
+        return 2.0 * self.cfg.strategy.leverage if cap is None else float(cap)
+
+    def _add_order(self, pr: PairRuntime, fraction: float, marks: Marks) -> PairOrder:
+        """Trade ``fraction`` of both legs in the direction of the holdings, rounded down to the lot step."""
+        s, book = pr.spec, pr.book
+        legs = []
+        for held, rules, px in ((book.qty_a, s.lots_a, marks.mid_a), (book.qty_b, s.lots_b, marks.mid_b)):
+            q = abs(held) * fraction
+            if rules is not None:
+                q = floor_to_step(q, rules.step)
+                if q < rules.min_qty or q * px < rules.min_notional:
+                    raise SizingError("this size is below the exchange minimum; choose a larger one")
+            if not q > 0:
+                raise SizingError("this fraction is smaller than one lot; choose a larger one")
+            legs.append(math.copysign(q, held))
+        gross = abs(book.qty_a + legs[0]) * marks.mid_a + abs(book.qty_b + legs[1]) * marks.mid_b
+        eq = book.equity(marks.mid_a, marks.mid_b)
+        cap = self.add_leverage_cap()
+        if not eq > 0 or gross / eq > cap * (1 + 1e-9):
+            raise SizingError(f"the position would reach {gross / eq if eq > 0 else math.inf:.2f}x the pair's "
+                              f"equity; the cap for additions is {cap:g}x")
+        return PairOrder(s.id, "add", s.symbol_a, s.symbol_b, legs[0], legs[1], marks.mid_a, marks.mid_b,
+                         "manual_add")
+
+    async def add_pair(self, pair_id: str, fraction: float, execution: str = "market") -> tuple[bool, str]:
+        """Add ``fraction`` of the open position (dashboard). The stop and the catastrophe stop keep
+        their USDT levels, so after an addition a smaller move in the spread reaches them."""
+        if not (math.isfinite(fraction) and 0 < fraction <= 1):
+            return False, "fraction must be above 0 and at most 1"
+        if execution not in ("market", "maker"):
+            return False, f"unknown execution {execution!r}"
+        async with self._lock:
+            pr = self.pair(pair_id)
+            if pr is None:
+                return False, "unknown pair"
+            s, strat = pr.spec, pr.strat
+            if strat.side == FLAT:
+                return False, "no open position to add to"
+            if s.close_only:
+                return False, "this pair is no longer in the pairs file; it is only being closed"
+            if pr.busy:
+                return False, "an order is being executed for this pair; try again in a minute"
+            if strat.deactivated:
+                return False, "the pair is deactivated (equity floor reached)"
+            m = self._marks(pr)
+            if m is None or not m.quotes_ok:
+                return False, "no fresh quotes for both legs"
+            try:
+                order = self._add_order(pr, fraction, m)
+            except SizingError as exc:
+                return False, str(exc)
+            decision = self.risk.approve(order, open_pairs=self.open_pairs(), gross_by_symbol=self.gross_by_symbol(),
+                                         total_equity=self.total_equity(), quotes_ok=m.quotes_ok)
+            if not decision.approved:
+                self.store.event("add_rejected", s.id, reason=decision.reason)
+                return False, f"rejected by risk: {decision.reason}"
+            order = replace(order, urgent=execution == "market")
+            now = self.feed.now_ms()
+            it = Intent(pr, order, now, now // HOUR_MS, marks=m)
+            self.store.event("manual_add", s.id, fraction=fraction, execution=execution)
+            if order.urgent:  # a market addition takes a second: settle it now, under the lock
+                ok = await self._execute_now(it)
+                self.store.save_pairs(self.pairs)
+                return ok, f"added {fraction:.0%} at market" if ok else "addition failed (see events)"
+            pr.busy = True
+        self._spawn(self._run(it))
+        return True, f"addition of {fraction:.0%} submitted, {self._how(execution)}"
 
     async def close_pair(self, pair_id: str, reason: str = "manual_close", fraction: float = 1.0,
                          execution: str = "market") -> tuple[bool, str]:

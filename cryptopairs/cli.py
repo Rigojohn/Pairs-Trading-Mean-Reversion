@@ -307,6 +307,37 @@ def cmd_reset_kill_switch(cfg: AppConfig, args) -> None:
         store.close()
 
 
+def cmd_alerts(cfg: AppConfig, args) -> None:
+    import os
+
+    from cryptopairs.runtime.alerts import (AlertConfig, AlertMonitor, Telegram, binance_funding, binance_moves,
+                                            binance_volume_x)
+    from cryptopairs.runtime.news import fetch_news
+
+    tg = Telegram(os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID"))
+    if args.chats:  # after the trader wrote to their bot: who wrote, with the chat id to put in .env
+        if not tg.token:
+            sys.exit("TELEGRAM_BOT_TOKEN is not set")
+        chats = tg.chats()
+        print("\n".join(f"{cid}  {name}" for cid, name in chats) or "nobody wrote to the bot yet: send it any message")
+        return
+    if args.test:
+        ok = tg.send("✅ <b>CryptoPairs</b>: οι ειδοποιήσεις λειτουργούν. Θα σου γράφω όταν ένα νόμισμα κινηθεί "
+                     "απότομα, όταν πολλά stops έρθουν από το ίδιο νόμισμα, όταν ένα bot σταματήσει, όταν μια θέση "
+                     "πληρώνει ακριβό funding ή ένα bot χάνει ≥3% σε μία μέρα, κάθε βράδυ στις 23:00 με τη σύνοψη, και με κάθε είδηση για νομίσματα της λίστας.")
+        sys.exit(0 if ok else "the test message was not sent (see the log)")
+    acfg = AlertConfig(check_every_s=args.every)
+    # Without Telegram set up a message counts as delivered once logged, so the log is not flooded.
+    mon = AlertMonitor(Path(cfg.runtime.state_dir), acfg, lambda msg: tg.send(msg) or not tg.ready,
+                       lambda coins: binance_moves(coins, acfg.window_min),
+                       lambda coin: binance_volume_x(coin, acfg.window_min), funding=binance_funding,
+                       news=fetch_news)
+    if args.once:
+        print("\n\n".join(mon.check()) or "nothing to report")
+        return
+    mon.run()
+
+
 # ---------------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="cryptopairs", description=__doc__)
@@ -374,18 +405,24 @@ def main(argv: list[str] | None = None) -> None:
     rk.add_argument("--mode", default="paper", choices=["paper", "live"])
     rk.add_argument("--name", help="bot name used with 'paper --name'")
 
+    al = sub.add_parser("alerts", help="Telegram alerts: coin shocks, stops on one coin, a bot that stopped")
+    al.add_argument("--every", type=float, default=120.0, help="seconds between checks")
+    al.add_argument("--once", action="store_true", help="one check, then exit")
+    al.add_argument("--test", action="store_true", help="send a test message and exit")
+    al.add_argument("--chats", action="store_true", help="list who wrote to the Telegram bot (chat ids)")
+
     args = p.parse_args(argv)
     cfg = load_config(args.config if Path(args.config).exists() else None, args.profile)
     name = getattr(args, "name", None)
     if name:
         cfg.runtime.state_name = name
     _setup_logging(cfg, args.command, args.verbose, name)
-    if args.command not in ("status", "export", "reset-kill-switch", "dashboard"):
+    if args.command not in ("status", "export", "reset-kill-switch", "dashboard", "alerts"):
         log.info("profile=%s config=%s", cfg.profile, args.config)
     handler = {
         "download": cmd_download, "metadata": cmd_metadata, "funnel": cmd_funnel,
         "calibrate": cmd_calibrate, "test": cmd_test, "research": cmd_research,
         "backtest": cmd_backtest, "paper": cmd_paper, "experiments": cmd_experiments, "status": cmd_status, "export": cmd_export,
-        "reset-kill-switch": cmd_reset_kill_switch, "dashboard": cmd_dashboard,
+        "reset-kill-switch": cmd_reset_kill_switch, "dashboard": cmd_dashboard, "alerts": cmd_alerts,
     }[args.command]
     handler(cfg, args)

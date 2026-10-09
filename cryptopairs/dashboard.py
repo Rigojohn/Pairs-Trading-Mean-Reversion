@@ -68,7 +68,7 @@ from cryptopairs.ui.widgets import sidebar  # noqa: E402
 
 VIEWS = Path(__file__).resolve().parent / "ui" / "views"
 PAGES = [  # (file, title, icon, url)
-    ("overview.py", "Overview", ":material/dashboard:", "overview"),
+    ("overview.py", "Portfolio", ":material/account_balance_wallet:", "portfolio"),
     ("pair.py", "Pair desk", ":material/candlestick_chart:", "pair"),
     ("backtest.py", "Backtest lab", ":material/science:", "lab"),
     ("journal.py", "Journal", ":material/menu_book:", "journal"),

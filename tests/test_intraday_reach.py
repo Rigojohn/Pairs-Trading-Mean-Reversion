@@ -89,4 +89,4 @@ def test_a_1m_spread_z_shows_the_entry_of_a_position_opened_two_days_ago():
     z = next(s for s in spec["series"] if s["id"] == "z")
     sell = [m for m in z["markers"] if m["text"].startswith("SELL")]
     assert len(sell) == 1 and sell[0]["time"] == (entry + HOUR) // 1000 + 60  # the first 1m bar after the decision
-    assert spec["visible_bars"] == TC.VISIBLE["1m"]  # it opens on the last 6 hours, as always; a scroll left shows it
+    assert spec["bar_px"] == TC.OPENING_PX and "visible_bars" not in spec  # opens on the latest bars; scroll left

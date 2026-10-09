@@ -174,6 +174,7 @@ def test_performance_spec_has_nav_high_water_drawdown_and_trades():
     assert by["nav"]["options"]["baseValue"]["price"] == 100.0 and by["nav"]["pane"] == 0
     assert {l["title"] for l in by["nav"]["lines"]} == {"capital", "kill switch"}
     assert [m["text"] for m in by["nav"]["markers"]] == ["A/B +1.50"]
+    assert by["nav"]["markers"][0]["time"] == (t0 + 21 * 60_000) // 1000  # the bar it closed in, not the one before
     assert by["hwm"]["data"]["v"][-1] == pytest.approx(103.0)
     dd = by["dd"]
     assert dd["pane"] == 1 and min(x for x in dd["data"]["v"] if x is not None) == pytest.approx(100 * (99 / 103 - 1))
@@ -235,3 +236,35 @@ def test_daily_funding_of_a_short_on_a_negative_rate_is_a_cost():
     day = F.funding_carry(rows, insts)["OGN_ANKR"]
     per_settlement = -(4758 * 0.02147 * 0.0028955) - 19694 * 0.00497 * 0.00005  # short OGN pays, long ANKR pays
     assert day == pytest.approx(6 * per_settlement) and day < 0  # every 4 h
+
+
+def test_every_nav_timeframe_opens_with_the_same_point_width():
+    """As in TradingView: one point every few pixels in every timeframe, so 1m opens on less time than 1H
+    (it used to open on 6 h while 5m-1D all showed the whole history, so a switch did not zoom)."""
+    grid = pd.DataFrame({"t": np.arange(5) * F.MINUTE, "nav": [100.0, 101, 99, 102, 103]})
+    spec = TC.performance_spec(grid, capital=100.0, peak_before=100.0)
+    assert spec["bar_px"] == TC.OPENING_PX == 6 and spec["fit"] is True
+    assert "visible_bars" not in spec
+
+
+def test_exits_closed_together_at_the_end_all_reach_the_chart_with_room_for_their_labels():
+    """Several pairs often close in the same bar, at a NAV high, and the latest ones sit at the right edge:
+    every one is a marker, the NAV series asks for room for the whole stack, and the chart keeps pixels
+    free after the last point for the newest label (js/chart.js: cpMarkerRoom, rightOffsetPixels)."""
+    t0 = 1_700_000_000_000 // 3_600_000 * 3_600_000
+    grid = pd.DataFrame({"t": t0 + np.arange(1, 25) * 3_600_000, "nav": np.linspace(100, 110, 24)})
+    late = int(grid["t"].iloc[-1]) - 20 * 60_000  # inside the last bar
+    trades = pd.DataFrame([{"pair_id": p, "exit_ts": late + k, "pnl": 1.0 + k} for k, p in enumerate("ABCD")])
+    spec = TC.performance_spec(grid, capital=100.0, peak_before=100.0, trades=trades, labels={p: p for p in "ABCD"})
+    nav = {s["id"]: s for s in spec["series"]}["nav"]
+    assert [m["text"] for m in nav["markers"]] == ["A +1.00", "B +2.00", "C +3.00", "D +4.00"]
+    assert {m["time"] for m in nav["markers"]} == {int(grid["t"].iloc[-1]) // 1000}
+    assert nav["marker_room"] is True and spec["right_px"] == TC.RIGHT_PX > 0
+    early = trades.assign(exit_ts=int(grid["t"].iloc[0]) - 50 * 60_000)  # inside the first bar, before its label
+    first = {s["id"]: s for s in TC.performance_spec(grid, capital=100.0, peak_before=100.0, trades=early)["series"]}
+    assert {m["time"] for m in first["nav"]["markers"]} == {int(grid["t"].iloc[0]) // 1000}
+    assert len(first["nav"]["markers"]) == 4
+    six = pd.DataFrame([{"pair_id": p, "exit_ts": late + k, "pnl": 1.0 + k} for k, p in enumerate("ABCDEF")])
+    day = {s["id"]: s for s in TC.performance_spec(grid, capital=100.0, peak_before=100.0, trades=six,
+                                                   labels={p: p for p in "ABCDEF"})["series"]}["nav"]
+    assert [m["text"] for m in day["markers"]] == ["D +4.00", "E +5.00", "F +6.00", "+3 more +6.00"]  # the latest

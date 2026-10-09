@@ -1,4 +1,4 @@
-"""Risk & controls: global switches, per-pair controls, parameter overrides, command history."""
+"""Risk & controls: global switches, pause by coin, per-pair controls, parameter overrides, command history."""
 
 import json
 
@@ -58,6 +58,45 @@ def live() -> None:
         sure = st.checkbox(f"I want to close ALL {n_open} position(s) at market", key="conf_flat", disabled=n_open == 0)
         if st.button("Flatten all", disabled=not sure, type="primary", key="g_flat"):
             W.send(ctx.db_path, "flatten_all")
+
+    heading("Pause by coin")
+    paused_coins = sorted(set(kv.get("paused_coins", []) or []))
+    coins: dict[str, dict] = {}
+    for r in rows.itertuples():
+        for coin, sign in ((r.a, 1), (r.b, -1)):  # a long spread is long A and short B
+            c = coins.setdefault(coin, {"pairs": 0, "long": 0, "short": 0})
+            c["pairs"] += 1
+            if r.side:
+                c["long" if r.side * sign > 0 else "short"] += 1
+    order = sorted(coins, key=lambda k: (k not in paused_coins, -(coins[k]["long"] + coins[k]["short"]),
+                                         -coins[k]["pairs"], k))
+
+    def label(k: str) -> str:
+        c = coins[k]
+        held = ", ".join(x for x in (f"long in {c['long']}" if c["long"] else "",
+                                     f"short in {c['short']}" if c["short"] else "") if x)
+        n = c["pairs"]
+        return f"{k} · {n} pair{'s' * (n != 1)}" + (f" · {held}" if held else "") + (" · PAUSED" if k in paused_coins else "")
+
+    a, b = st.columns([3, 2], gap="medium")
+    with a:
+        pick = st.selectbox("Coin", order, format_func=label, key="ctl_coin")
+        if pick in paused_coins:
+            if st.button(f"Resume {pick}", key="ctl_coin_resume"):
+                W.send(ctx.db_path, "resume_coin", coin=pick)
+        elif pick and st.button(f"Pause {pick} in all its pairs", key="ctl_coin_pause"):
+            W.send(ctx.db_path, "pause_coin", coin=pick)
+        st.caption("For news or a pump on one coin: the bot opens no new position on its own in any pair with "
+                   "that coin. Open positions keep their exits and stops, and your manual orders still work.")
+    with b:
+        st.markdown("**Paused coins**")
+        if not paused_coins:
+            st.html(pill("NONE", "ok"))
+        for k in paused_coins:
+            c1, c2 = st.columns([2, 3])
+            c1.html(pill(f"{k} PAUSED", "warn"))
+            if c2.button(f"Resume {k}", key=f"ctl_coin_resume_{k}"):
+                W.send(ctx.db_path, "resume_coin", coin=k)
 
     heading("Risk limits in force")
     lim = W.kpis("limits")

@@ -1,6 +1,8 @@
 // Sidebar watchlist (ui/tv.py watchlist()): every pair with its position, Z and PnL from the
 // bot's live marks. Open positions first, then the flat pairs nearest to an entry signal.
 // A click sends the pair to Python ("pick"): it becomes the focus pair of every page and its Pair desk opens.
+// The search box above the list filters it in the browser as you type ("/" jumps to it, ↑/↓ move, Enter opens,
+// Esc clears); the text is kept for the browser tab, so it survives a page switch.
 
 function cpWlRow(r, focus) {
   const side = r.side > 0 ? '<span class="wl-side long">L</span>' : r.side < 0 ? '<span class="wl-side short">S</span>'
@@ -86,13 +88,144 @@ function cpWlCloseSidebar() {
   if (b) b.click();
 }
 
+// The search text: every word must be found in one of the two coins ("ogn", "ogn ct", "band/sk").
+const CP_WL_Q = "cp-wl-q";
+
+function cpWlLoadQ() {
+  try { return sessionStorage.getItem(CP_WL_Q) || ""; } catch (e) { return ""; }
+}
+
+function cpWlSaveQ(q) {
+  try { if (q) sessionStorage.setItem(CP_WL_Q, q); else sessionStorage.removeItem(CP_WL_Q); } catch (e) { /* private mode */ }
+}
+
+function cpWlMatch(r, words) {
+  const a = String(r.a).toUpperCase(), b = String(r.b).toUpperCase();
+  return words.every((w) => a.includes(w) || b.includes(w));
+}
+
+function cpWlWords(q) {
+  return q.toUpperCase().split(/[\s/_,-]+/).filter(Boolean);
+}
+
+// A pair picked by a tap or by Enter in the search box.
+function cpWlPick(el, id) {
+  el.querySelectorAll(".wl-row.on").forEach((x) => x.classList.remove("on"));
+  const row = [...el.querySelectorAll(".wl-row")].find((x) => x.dataset.id === id);
+  if (row) row.classList.add("on");  // instant feedback; the page follows after the rerun
+  const name = row && row.querySelector(".wl-name");
+  cpWlLoading(id, name ? name.textContent.replace(/[❚✎⟳⚑]/g, "").replace("/", " / ") : id);
+  cpWlSwitchNow(id);
+  el._pending = id;
+  el._tries = 0;
+  el._sent = 0;
+  el._since = Date.now();
+  cpWlFlush(el);
+  cpWlCloseSidebar();
+}
+
+function cpWlRender(el) {
+  const data = el._data || {};
+  const shown = el._pending || data.focus;  // a click waiting to be sent keeps its highlight
+  const words = cpWlWords(el._q || "");
+  const all = data.rows || [];
+  const rows = words.length ? all.filter((r) => cpWlMatch(r, words)) : all;
+  el._shown = rows.map((r) => r.id);
+  if (!el._shown.includes(el._kb)) el._kb = null;
+  const sig = JSON.stringify([data, shown, words, el._kb]);
+  if (sig === el._sig) return;  // the framework redraws far more often than the data changes
+  el._sig = sig;
+  const row = (r) => cpWlRow(r, shown).replace('class="wl-row ', `class="wl-row ${r.id === el._kb ? "kb " : ""}`);
+  const open = rows.filter((r) => r.side), flat = rows.filter((r) => !r.side);
+  const n = (part, whole) => words.length ? `${part.length} of ${whole.length}` : `${part.length}`;
+  const head = (t, part, whole, right) => `<div class="wl-h"><span>${t} · ${n(part, whole)}</span><span>${right}</span></div>`;
+  let html;
+  if (words.length && !rows.length) {
+    html = '<div class="wl-none">No pair matches this search</div>';
+  } else {
+    html = (words.length && !open.length ? "" : head("Open positions", open, all.filter((r) => r.side), "uPnL")
+        + (open.map(row).join("") || '<div class="wl-empty">none</div>'))
+      + (words.length && !flat.length ? "" : head("Watching", flat, all.filter((r) => !r.side), "PnL")
+        + flat.map(row).join(""));
+  }
+  el._list.innerHTML = html
+    + '<div class="wl-foot">Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
+    + '❚❚ paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
+}
+
+// The search box: kept across the list's redraws (it is not part of the redrawn HTML), so typing is never lost.
+function cpWlSearch(el) {
+  const box = document.createElement("div");
+  box.className = "wl-q";
+  box.innerHTML = '<input type="text" inputmode="search" enterkeyhint="go" placeholder="Search pairs" autocomplete="off" '
+    + 'autocapitalize="characters" spellcheck="false" aria-label="Search pairs"><kbd title="press / to search">/</kbd><button type="button" title="Clear (Esc)">×</button>';
+  const input = box.querySelector("input"), clear = box.querySelector("button");
+  const set = (q) => {
+    el._q = q;
+    el._kb = null;
+    box.classList.toggle("has", !!q);
+    cpWlSaveQ(q);
+    cpWlRender(el);
+  };
+  input.value = el._q;
+  box.classList.toggle("has", !!el._q);
+  input.addEventListener("input", () => set(input.value));
+  input.addEventListener("keydown", (ev) => {
+    const ids = el._shown || [];
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      if (!ids.length) return;
+      ev.preventDefault();
+      const i = ids.indexOf(el._kb);
+      el._kb = ids[ev.key === "ArrowDown" ? (i + 1) % ids.length : i <= 0 ? ids.length - 1 : i - 1];
+      cpWlRender(el);
+      const r = el._list.querySelector(".wl-row.kb");
+      if (r) r.scrollIntoView({ block: "nearest" });
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      const id = el._kb || ids[0];
+      if (!id) return;
+      if (window.matchMedia("(pointer: coarse)").matches) input.blur();  // close the phone's keyboard
+      cpWlPick(el, id);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      if (input.value) { input.value = ""; set(""); } else input.blur();
+    }
+  });
+  clear.addEventListener("click", () => { input.value = ""; set(""); input.focus(); });
+  return box;
+}
+
+// "/" anywhere on the page (not while typing in a field) jumps to the search box, if the sidebar is open.
+function cpWlHotkey() {
+  if (window.__cpWlHotkey) return;
+  window.__cpWlHotkey = true;
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "/" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const t = ev.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    const input = document.querySelector(".wl-q input");
+    if (!input) return;
+    const box = input.getBoundingClientRect();
+    if (box.width === 0 || box.right <= 0) return;  // sidebar closed
+    ev.preventDefault();
+    input.focus();
+    input.select();
+  });
+}
+
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component;
   let el = parentElement.querySelector(".wl");
+  if (el && !el._list) { el.remove(); el = null; }  // drawn by an older version of this script
   if (!el) {
     el = document.createElement("div");
     el.className = "wl";
+    el._q = cpWlLoadQ();
+    el.appendChild(cpWlSearch(el));
+    el._list = document.createElement("div");
+    el.appendChild(el._list);
     parentElement.appendChild(el);
+    cpWlHotkey();
     // The rows are redrawn about once a second (live Z): a finger that touches a row and lifts 100 ms later
     // would find it replaced and no click would fire. So the row is remembered on pointerdown and the tap
     // is taken on pointerup, whatever the DOM looks like by then (a swipe, to scroll the list, is not a tap).
@@ -106,18 +239,7 @@ export default function (component) {
       const d = el._down;
       el._down = null;
       if (!d || Math.abs(ev.clientX - d.x) > 10 || Math.abs(ev.clientY - d.y) > 10) return;
-      el.querySelectorAll(".wl-row.on").forEach((x) => x.classList.remove("on"));
-      const row = [...el.querySelectorAll(".wl-row")].find((x) => x.dataset.id === d.id);
-      if (row) row.classList.add("on");  // instant feedback; the page follows after the rerun
-      const name = row && row.querySelector(".wl-name");
-      cpWlLoading(d.id, name ? name.textContent.replace(/[❚✎⟳⚑]/g, "").replace("/", " / ") : d.id);
-      cpWlSwitchNow(d.id);
-      el._pending = d.id;
-      el._tries = 0;
-      el._sent = 0;
-      el._since = Date.now();
-      cpWlFlush(el);
-      cpWlCloseSidebar();
+      cpWlPick(el, d.id);
     };
     document.addEventListener("pointerup", up, true);
     // A click anywhere else (a timeframe, a tab) cancels a pick still waiting to be re-sent: a late re-send
@@ -137,16 +259,6 @@ export default function (component) {
   el._renders = (el._renders || 0) + 1;
   el._focus = data.focus;
   if (el._pending && cpWlDelivered(el)) el._pending = null;
-  const shown = el._pending || data.focus;  // a click waiting to be sent keeps its highlight
-  const sig = JSON.stringify([data, shown]);
-  if (sig === el._sig) return;  // the framework redraws far more often than the data changes
-  el._sig = sig;
-  const rows = data.rows || [];
-  const open = rows.filter((r) => r.side), flat = rows.filter((r) => !r.side);
-  const head = (t, n, right) => `<div class="wl-h"><span>${t} · ${n}</span><span>${right}</span></div>`;
-  el.innerHTML = head("Open positions", open.length, "uPnL") + (open.map((r) => cpWlRow(r, shown)).join("")
-      || '<div class="wl-empty">none</div>')
-    + head("Watching", flat.length, "PnL") + flat.map((r) => cpWlRow(r, shown)).join("")
-    + '<div class="wl-foot">Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
-    + '❚❚ paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
+  el._data = data;
+  cpWlRender(el);
 }

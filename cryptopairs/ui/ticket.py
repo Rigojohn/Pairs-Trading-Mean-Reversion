@@ -222,3 +222,64 @@ def preview_close(pair: dict, fraction: float, execution: str, books: dict | Non
         p.notes.append("The position stays open with the same entry prices and stops; the stop now needs a "
                        "larger move in the spread, because the position is smaller.")
     return p
+
+
+@dataclass
+class AddPreview(Preview):
+    gross_now: float = math.nan  # the open position's gross notional at mid
+    lev_now: float = math.nan  # gross / pair equity
+    lev_after: float = math.nan
+    stop_room_now: float = math.nan  # USDT the position can lose before the stop
+    stop_room_after: float = math.nan
+    stop_pct_now: float = math.nan  # the same as % of the position: the adverse move that reaches the stop
+    stop_pct_after: float = math.nan
+
+
+def preview_add(pair: dict, fraction: float, execution: str, books: dict | None, insts: dict | None,
+                taker_fee: float, maker_fee: float, cap: float) -> AddPreview:
+    """``pair``: symbol_a/b, label_a/b, qty_a/b, entry_a/b, cash, stop_level (USDT pair equity).
+    ``cap``: the highest gross / pair equity an addition may reach (the bot's rule)."""
+    p = AddPreview()
+    if not books or pair["symbol_a"] not in books or pair["symbol_b"] not in books:
+        p.warning = NO_BOOK
+        return p
+    qs, mids = [], []
+    for held, sym in ((pair["qty_a"], pair["symbol_a"]), (pair["qty_b"], pair["symbol_b"])):
+        q = abs(held) * fraction
+        mid = sum(_best(books[sym])) / 2
+        rules = lot_rules((insts or {}).get(sym))
+        if rules is not None:
+            q = floor_to_step(q, rules.step)
+            if q < rules.min_qty or q * mid < rules.min_notional:
+                p.error = "this size is below the exchange minimum; choose a larger one"
+                return p
+        if not q > 0:
+            p.error = "this fraction is smaller than one lot; choose a larger one"
+            return p
+        qs.append(math.copysign(q, held))
+        mids.append(mid)
+    p.legs = _legs(pair, books, insts, qs[0], qs[1], execution, taker_fee, maker_fee)
+    held = (pair["qty_a"], pair["qty_b"])
+    equity = pair["cash"] + sum(h * (m - e) for h, m, e in zip(held, mids, (pair["entry_a"], pair["entry_b"])))
+    p.gross_now = sum(abs(h) * m for h, m in zip(held, mids))
+    gross_after = sum(abs(h + q) * m for h, q, m in zip(held, qs, mids))
+    p.lev_now, p.lev_after = p.gross_now / equity, gross_after / (equity - p.cost)
+    if p.lev_after > cap * (1 + 1e-9):
+        p.error = (f"the position would reach {p.lev_after:.2f}x the pair's equity; the cap for additions is "
+                   f"{cap:g}x (risk.manual_add_max_leverage)")
+        return p
+    p.stop_level = pair["stop_level"]
+    p.stop_room_now = equity - p.stop_level
+    p.stop_room_after = p.stop_room_now - p.cost
+    p.stop_pct_now = 100 * p.stop_room_now / p.gross_now
+    p.stop_pct_after = 100 * p.stop_room_after / gross_after
+    p.funding_next, p.funding_day = _funding(p.legs, insts)
+    if not all(l.depth_ok for l in p.legs):
+        p.notes.append("The order is larger than the 50 book levels shown: the fill estimate is incomplete.")
+    p.notes.append("The stop and the catastrophe stop keep their USDT levels: on a larger position a smaller move "
+                   "against you reaches them. Widen the stop in Exit plan if you want the same room in the spread.")
+    p.notes.append("The entry prices become the average of the old and the new fills; it stays one trade.")
+    if execution == "maker":
+        p.notes.append("Maker-first: the larger leg rests post-only at the best price, every fill is hedged at "
+                       "market, and whatever is left after the timeout goes at market.")
+    return p

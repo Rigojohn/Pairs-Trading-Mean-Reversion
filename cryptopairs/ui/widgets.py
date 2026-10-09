@@ -180,7 +180,8 @@ def watchlist_rows(rows: pd.DataFrame, pending: set[str]) -> list[dict]:
     for r in rows.to_dict("records"):
         out.append({"id": r["pair"], "a": r["a"], "b": r["b"], "side": int(r["side"]), "z": num(r["Z now"]),
                     "ze": float(r["Z entry"]), "to_entry": num(r.get("to entry")), "pnl": num(r["PnL"]),
-                    "upnl": num(r["unrealized"]), "status": r["status"], "paused": bool(r["paused"]),
+                    "upnl": num(r["unrealized"]), "status": r["status"],
+                    "paused": bool(r["paused"]) or bool(r.get("coin paused")),
                     "override": bool(r["override"]), "plan": bool(r.get("exit plan")), "busy": r["pair"] in pending})
     key = lambda x: ((0, -(x["upnl"] or 0.0)) if x["side"] else  # noqa: E731
                      (1, x["to_entry"] if x["to_entry"] is not None else math.inf))

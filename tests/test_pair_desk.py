@@ -152,7 +152,8 @@ def test_z_spec_has_thresholds_trades_and_a_live_binding():
     assert z["live"]["kind"] == "z" and z["live"]["label"] == "end" and z["live"]["fit"]["sigma"] == 0.02
     assert by["spread"]["live"]["kind"] == "spread" and by["spread"]["live"]["scale"] == 100.0
     assert all("live" not in s for s in spec2["series"])  # no fit from the bot: nothing to follow live
-    assert "shade0" in by and sum(v is not None for v in by["shade0"]["data"]["v"]) >= 10
+    assert [(b["from"], b["to"]) for b in z["boxes"]] == [(m[0]["time"], m[1]["time"])]  # from BUY to CLOSE
+    assert z["boxes"][0]["fill"].startswith("rgba(") and not any(k.startswith("shade") for k in by)
     assert all(s["pane"] == 1 for k, s in by.items() if k.startswith(("band", "spread")))
     u = np.asarray(by["spread"]["data"]["v"], dtype=float)  # spread in %, bands = z x sigma in %
     assert np.allclose(u, np.asarray(z["data"]["v"], dtype=float) * 0.02 * 100)
@@ -257,6 +258,41 @@ def test_an_hourly_decision_is_marked_on_the_first_intraday_bar_after_the_close(
     assert [x["time"] for x in m] == [(int(bar[10]) + HOUR) // 1000 + 60, (int(bar[20]) + HOUR) // 1000 + 60]
     hourly = TC.trade_markers(trades, (bar + HOUR) // 1000, 3600, "end")
     assert [x["time"] for x in hourly] == [(int(bar[10]) + HOUR) // 1000, (int(bar[20]) + HOUR) // 1000]
+
+
+def test_each_trade_is_its_own_box_from_its_entry_marker_to_its_exit_marker_on_every_timeframe():
+    fit = _model(n=200)
+    bar = fit["bar_ts"].to_numpy()
+    stop_ms = int(bar[60]) + HOUR + 23 * 60_000 + 1804  # an intrabar stop, 23 minutes after a close
+    trades = pd.DataFrame([
+        _trade(fit, 10, 30, side=-1),                                             # decided at closes
+        _trade(fit, 31, 50, side=1),                                              # one hour after the exit
+        {**_trade(fit, 50, None, side=-1), "entry_ts": int(bar[50]) + HOUR + 35 * 60_000 + 7732,  # manual,
+         "exit_ts": stop_ms, "entry_reason": "manual"},                          # minutes after the exit
+        _trade(fit, 61, None, side=1),                                            # still open
+    ])
+    now = int(bar[-1]) + HOUR
+    for tf, sec in TC.TF_SECONDS.items():
+        times = np.arange((int(bar[0]) + HOUR) // 1000, now // 1000 + sec, sec) // sec * sec
+        boxes = TC.position_boxes(trades, sec)
+        marks = TC.trade_markers(trades, np.unique(times), sec, "end")
+        ins = [m["time"] for m in marks if m["text"].split()[-1] in ("BUY", "SELL")]
+        outs = [m["time"] for m in marks if m["text"].startswith(("CLOSE", "STOP"))]
+        assert len(boxes) == 4, tf  # never merged, even where an exit and the next entry share a bar
+        assert [b["from"] for b in boxes] == ins, tf
+        assert [b["to"] for b in boxes[:3]] == outs and boxes[3]["to"] is None, tf
+        assert all(b["from"] <= b["to"] for b in boxes[:3]), tf
+        assert [b["fill"] for b in boxes] == [TC._rgba(TC.RED, 0.1), TC._rgba(TC.GREEN, 0.1)] * 2, tf
+
+
+def test_every_spread_z_timeframe_opens_with_the_same_bar_width_and_keeps_the_user_s_zoom():
+    """As in TradingView: a timeframe switch keeps the width of a bar (js/chart.js keep_zoom), so 1m shows
+    less time than 1h; it used to open each timeframe on its own bar count (1.9 px at 1h, 3.7 at 4h, 0.6 at 1d)."""
+    fit = _model(n=200)
+    now = int(fit["bar_ts"].iloc[-1]) + HOUR
+    for tf in TC.TF_SECONDS:
+        spec = TC.z_spec(TC.closes(None, None), fit, pd.DataFrame(), tf, z_entry=2.0, z_exit=0.5, now_ms=now)
+        assert spec["bar_px"] == TC.OPENING_PX and spec["keep_zoom"] is True and "visible_bars" not in spec, tf
 
 
 def test_markers_sit_at_the_z_the_fills_got():

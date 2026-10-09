@@ -46,7 +46,8 @@ LIVE_COLUMNS = ("ts", "pair_id", "side", "equity", "unrealized", "z_buy", "z_sel
 FIT_COLUMNS = ("bar_ts", "pair_id", "kf_alpha", "kf_beta", "kf_sigma", "used_alpha", "used_beta",
                "used_sigma", "spread_u", "z", "log_a", "log_b")
 COMMAND_KINDS = ("close_pair", "pause_pair", "resume_pair", "pause_entries", "resume_entries",
-                 "reset_kill_switch", "flatten_all", "set_params", "clear_params", "open_pair", "set_exit_plan")
+                 "reset_kill_switch", "flatten_all", "set_params", "clear_params", "open_pair", "set_exit_plan",
+                 "add_pair", "pause_coin", "resume_coin")
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -400,7 +401,7 @@ class StateStore:
             self._upsert_pair(c, pr)
 
     def commit_reduce(self, order_id: int, report, pr) -> None:
-        """Fills of a partial close + the open trade's fees + pair state, atomically."""
+        """Fills of a partial close or an addition + the open trade's fees + pair state, atomically."""
         with self.tx() as c:
             self._fills(c, order_id, report)
             trade = pr.trade or {}

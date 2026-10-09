@@ -69,3 +69,27 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Telegram alerts (2026-10-08): a coin shock, several stops from one coin, a bot that stopped.
+  # Reads the bots' databases read-only and Binance's public prices; never trades. The token and
+  # the chat id live only on the server, in /opt/cryptopairs/.env (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
+  alerts:
+    build: .                          # same Dockerfile: built from the cache
+    container_name: cryptopairs-alerts
+    restart: unless-stopped
+    command: ["alerts"]
+    env_file:
+      - path: .env
+        required: false               # without it the alerts are only written to logs/alerts.log
+    volumes:
+      - ./state:/app/state            # reads the bots' databases; keeps state/alerts.json (what was sent)
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    environment:
+      - TZ=UTC
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

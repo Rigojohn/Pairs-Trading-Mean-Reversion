@@ -131,7 +131,8 @@ def load_state(d: dict, ctx, pid: str, pending: pd.DataFrame) -> PairState | Non
                 "kalman_delta": delta},
         cfg=cfg, insts=insts, pending=pending, bot_age=D.heartbeat_age(d),
         kill_switch=bool(kv.get("risk.kill_switch")), commands=d["commands"],
-        paused=pid in set(kv.get("paused_pairs", []) or []) or bool(kv.get("entries_paused")),
+        paused=pid in set(kv.get("paused_pairs", []) or []) or bool(kv.get("entries_paused"))
+        or bool(rows[rows["pair"] == pid].iloc[0].get("coin paused")),
     )
 
 
@@ -211,12 +212,15 @@ def ticket(s: PairState, ctx) -> None:
     taker, maker = cfg.costs.taker_fee, cfg.costs.maker_fee
     maker_default = cfg.runtime.execution == "maker_first"
     books = M.order_books((s.sym_a, s.sym_b))
-    tabs = st.tabs(["Open", "Close", "Exit plan"] if not s.side else ["Close", "Exit plan", "Open"])
-    by = dict(zip(["Open", "Close", "Exit plan"] if not s.side else ["Close", "Exit plan", "Open"], tabs))
+    names = ["Open", "Close", "Exit plan"] if not s.side else ["Close", "Add", "Exit plan", "Open"]
+    by = dict(zip(names, st.tabs(names)))
     with by["Open"]:
         _open_tab(s, ctx, books, taker, maker, maker_default)
     with by["Close"]:
         _close_tab(s, ctx, books, taker, maker)
+    if "Add" in by:
+        with by["Add"]:
+            _add_tab(s, ctx, books, taker, maker, maker_default, cfg)
     with by["Exit plan"]:
         _exit_tab(s, ctx)
 
@@ -232,7 +236,7 @@ def _sent(s: PairState) -> None:
 
 def _open_tab(s: PairState, ctx, books, taker: float, maker: float, maker_default: bool) -> None:
     if s.side:
-        st.caption("The pair already holds a position. Close it first (adding to a position is not supported).")
+        st.caption("The pair already holds a position: use Add to make it larger, or close it first.")
         return
     if s.strat.get("deactivated"):
         st.warning("This pair is deactivated (its equity fell to the floor): the bot refuses new positions.")
@@ -341,6 +345,56 @@ def _close_tab(s: PairState, ctx, books, taker: float, maker: float) -> None:
     if st.button("Send order to the bot", type="primary", key=f"tk_send_close_{s.pid}",
                  disabled=not sure or why is not None, width="stretch"):
         W.send(ctx.db_path, "close_pair", s.pid, fraction=fraction, execution=execution)
+        _sent(s)
+
+
+def _add_tab(s: PairState, ctx, books, taker: float, maker: float, maker_default: bool, cfg) -> None:
+    """Add to the open position (the opposite of a partial close)."""
+    if s.strat.get("deactivated"):
+        st.warning("This pair is deactivated (its equity fell to the floor): the bot refuses additions.")
+        return
+    c1, c2 = st.columns(2)
+    frac_lbl = c1.segmented_control("Size", ["25%", "50%", "75%", "100%"], default="50%", key=f"tk_add_frac_{s.pid}",
+                                    required=True, help="of the position held now: 100% doubles it")
+    fraction = int((frac_lbl or "50%").rstrip("%")) / 100
+    ex_lbl = c2.segmented_control("Execution", ["Market", "Maker-first"], key=f"tk_ex_add_{s.pid}", required=True,
+                                  default="Maker-first" if maker_default else "Market")
+    execution = "maker" if ex_lbl == "Maker-first" else "market"
+    cap = cfg.risk.manual_add_max_leverage or 2.0 * cfg.strategy.leverage
+    pct = s.scfg.get("stop_loss_pct") if s.strat.get("stop_pct_override") is None else s.strat["stop_pct_override"]
+    b = s.book
+    pair = {"symbol_a": s.sym_a, "symbol_b": s.sym_b, "label_a": s.a, "label_b": s.b, "qty_a": float(b["qty_a"]),
+            "qty_b": float(b["qty_b"]), "entry_a": float(b["entry_px_a"]), "entry_b": float(b["entry_px_b"]),
+            "cash": float(b["cash"]),
+            "stop_level": (1.0 - float(pct or 0.0)) * float(s.strat.get("entry_equity") or b["cash"])}
+    p = T.preview_add(pair, fraction, execution, books, s.insts, taker, maker, float(cap))
+    if p.error:
+        st.error(p.error)
+        return
+    if p.warning:
+        st.warning(p.warning)
+    else:
+        _legs_table(p, s)
+        k = W.kpis(f"tk_add_{s.pid}")
+        k.metric("Position", f"{p.gross_now:,.2f} → {p.gross_now + p.gross:,.2f}", "USDT gross notional",
+                 delta_color="off", delta_arrow="off")
+        k.metric("Leverage", f"{p.lev_now:.2f}x → {p.lev_after:.2f}x", f"cap {cap:g}x of the pair's equity",
+                 delta_color="off", delta_arrow="off")
+        k.metric("Room to the stop", f"{p.stop_pct_now:.1f}% → {p.stop_pct_after:.1f}%",
+                 f"{p.stop_room_after:,.2f} USDT to stop at {p.stop_level:,.2f}", delta_color="off", delta_arrow="off",
+                 help="how far the position can move against you before the stop closes it, as % of the position")
+        k.metric("Est. cost", f"{p.cost:,.4f}", f"{p.cost_bps:.1f} bps of the addition", delta_color="off",
+                 delta_arrow="off")
+    for n in p.notes:
+        st.caption("• " + n)
+    why = _blocked(s, opening=True)
+    if why:
+        st.warning(why)
+    sure = st.checkbox(f"Confirm: add {fraction:.0%} to {s.a}/{s.b}, {ex_lbl or 'Market'}", key=_confirm_key("add", s),
+                       disabled=why is not None)
+    if st.button("Send order to the bot", type="primary", key=f"tk_send_add_{s.pid}",
+                 disabled=not sure or why is not None, width="stretch"):
+        W.send(ctx.db_path, "add_pair", s.pid, fraction=fraction, execution=execution)
         _sent(s)
 
 

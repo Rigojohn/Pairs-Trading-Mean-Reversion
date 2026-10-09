@@ -201,8 +201,8 @@ def load_pair(db_path: str, version: float, pair_id: str, since_ms: int) -> dict
     return {
         "fit": q("SELECT * FROM fit_history WHERE pair_id=? AND bar_ts >= ? ORDER BY bar_ts", (pair_id, since_ms - HOUR)),
         "pending": q("SELECT * FROM orders WHERE pair_id=? AND status='pending' ORDER BY id", (pair_id,)),
-        "reductions": q("SELECT ts, payload FROM events WHERE pair_id=? AND kind='position_reduced' ORDER BY ts",
-                        (pair_id,)),
+        "reductions": q("SELECT ts, kind, payload FROM events WHERE pair_id=? "
+                        "AND kind IN ('position_reduced', 'position_added') ORDER BY ts", (pair_id,)),
     }
 
 
@@ -335,6 +335,7 @@ def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
     trades = d["trades"]
     kv = kv_dict(d)
     paused = set(kv.get("paused_pairs", []) or [])
+    paused_coins = set(kv.get("paused_coins", []) or [])
     overrides = kv.get("param_overrides") or {}
     now = now_ms()
     rows = []
@@ -360,6 +361,7 @@ def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
         spread_entry = (math.log(book["entry_px_a"]) - alpha - beta * math.log(book["entry_px_b"])
                         if side and alpha is not None and book["entry_px_a"] > 0 and book["entry_px_b"] > 0 else np.nan)
         delta = None if r.kalman_delta is None or pd.isna(r.kalman_delta) else float(r.kalman_delta)
+        coins_off = "/".join(c for c in (r.symbol_a.split("/")[0], r.symbol_b.split("/")[0]) if c in paused_coins)
         row = {
             "pair": r.pair_id, "a": r.symbol_a.split("/")[0], "b": r.symbol_b.split("/")[0],
             "sym_a": r.symbol_a, "sym_b": r.symbol_b,
@@ -378,9 +380,10 @@ def _pair_rows(d: dict, cfg: dict) -> pd.DataFrame:
             "trades": len(closed), "wins": int((closed["pnl"] > 0).sum()) if len(closed) else 0,
             "realized": float(closed["pnl"].sum()) if len(closed) else 0.0,
             "funding": float(book.get("funding_paid", 0.0)), "fees": float(book.get("fees_paid", 0.0)),
-            "override": r.pair_id in overrides, "paused": r.pair_id in paused,
+            "override": r.pair_id in overrides, "paused": r.pair_id in paused, "coin paused": coins_off,
             "status": ", ".join(x for x in (
                 "paused" if r.pair_id in paused else "",
+                f"{coins_off} paused" if coins_off else "",
                 "deactivated" if st_.get("deactivated") else "",
                 "cooldown" if (st_.get("cooldown_until") or -1) > now else "",
                 "override" if r.pair_id in overrides else "",

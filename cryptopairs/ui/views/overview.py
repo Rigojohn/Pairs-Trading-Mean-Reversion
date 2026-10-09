@@ -311,13 +311,14 @@ def _performance(d: dict, capital: float, nav: float, kill_level: float, trades:
     bar = st.container(horizontal=True, gap="medium", vertical_alignment="center")
     bar.segmented_control("Timeframe", list(F.TIMEFRAMES), default=auto, key="ov_tf", required=True,
                           label_visibility="collapsed",
-                          help="how much time one point of the curve covers; every timeframe shows the whole history "
-                               "from the start of paper trading")
+                          help="how much time one point of the curve covers; a finer timeframe opens on less time "
+                               "(as in TradingView), scroll left for the rest, double-click for the whole history")
     show = bar.toggle("Closed trades on the chart", value=True, key="ov_show_trades")
     coarse = (f" (coarsened to {step // 60_000} min: the history is long)" if step > F.TIMEFRAMES[tf] else "")
     bar.caption(f"from the start of paper trading, {D.to_time(start):%d/%m %H:%M}, to now · one point = {tf}{coarse} · "
-                "scroll to zoom, double-click to see everything · a gap = the bot was not running · "
-                f"dotted = high-water mark · times {D.TZ_LABEL}")
+                "opens on the latest points (less time on a finer timeframe) · scroll left for earlier, "
+                "double-click for everything · a gap = the bot was not running · dotted = high-water mark · "
+                f"times {D.TZ_LABEL}")
     labels = {r.pair_id: f"{r.symbol_a.split('/')[0]}/{r.symbol_b.split('/')[0]}" for r in d["pairs"].itertuples()}
     peak_before = F.high_water(pts, start, capital)
     spec = TC.performance_spec(grid, capital=capital, peak_before=peak_before, kill_level=kill_level,
@@ -325,7 +326,6 @@ def _performance(d: dict, capital: float, nav: float, kill_level: float, trades:
                                max_dd=F.range_max_drawdown(pts, start, end, peak_before))
     if grid["nav"].notna().sum() < 2:
         st.info("The NAV curve appears a few seconds after the bot starts.")
-    spec["fit"] = True  # the whole history stays in view as points are added, until the user zooms
     TV.chart(spec, key="ov_perf", rev=f"perf-{tf}")
 
     a, b, c = st.columns([5, 4, 4], gap="medium")

@@ -75,6 +75,26 @@ class PairBook:
             self.entry_px_a = self.entry_px_b = 0.0
         return realized
 
+    def add(self, qty_a: float, qty_b: float, fill_a: float, fill_b: float, fee: float) -> None:
+        """Add to the position (manual scale-in) at the fill prices.
+
+        ``qty_a`` / ``qty_b`` are the signed quantities traded, in the direction of the holdings.
+        Each leg's entry price becomes the quantity-weighted average, so equity at the fill
+        prices only changes by the fee.
+        """
+        if not self.in_position:
+            raise RuntimeError("book has no position to add to")
+        for q, held in ((qty_a, self.qty_a), (qty_b, self.qty_b)):
+            if q * held < 0 or (q != 0.0 and held == 0.0):
+                raise RuntimeError("an addition must trade in the direction of the holdings")
+        for leg, q, fill in (("a", qty_a, fill_a), ("b", qty_b, fill_b)):
+            held, entry = getattr(self, f"qty_{leg}"), getattr(self, f"entry_px_{leg}")
+            if q != 0.0:
+                setattr(self, f"entry_px_{leg}", (held * entry + q * fill) / (held + q))
+                setattr(self, f"qty_{leg}", held + q)
+        self.cash -= fee
+        self.fees_paid += fee
+
     def apply_funding(self, rate_a: float, px_a: float, rate_b: float, px_b: float) -> float:
         """Settle one funding event. Longs pay a positive rate; shorts receive it.
 

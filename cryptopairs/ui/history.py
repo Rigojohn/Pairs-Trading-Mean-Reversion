@@ -119,3 +119,31 @@ def warm(data_dir: str, jobs: list[tuple], candle_limit: int) -> None:
             _WARM["busy"] = False
 
     threading.Thread(target=work, daemon=True, name="warm-up").start()
+
+
+# ------------------------------------------------------------- older Spread Z, while the user scrolls left
+# Bars per piece at 1h and 4h, cut from the history already in memory; 1m/5m/15m come from Binance
+# in blocks of 1000 (market.older_candles).
+OLDER_BARS = {"1h": 1500, "4h": 1500}
+
+
+def older_piece(px: pd.DataFrame, fit: pd.DataFrame, trades: pd.DataFrame, tf: str, before_s: int,
+                zkw: dict, data_starts: bool) -> dict:
+    """The Spread Z of the bars before ``before_s`` (the close time, s, of the earliest point the chart
+    has), drawn by the very ``z_spec`` that draws the chart, so a bar's Z is the same in both.
+
+    ``px``: closes of those bars; ``fit``: the bot's model rows with the archive in front.
+    ``data_starts``: ``px`` holds the first bars there are (the coin's listing, the archive's start).
+    Returns, per series id, its data and markers, and ``done`` once nothing older is left.
+    """
+    px = px[px["ts"] + TC.TF_SECONDS[tf] * 1000 <= int(before_s) * 1000] if len(px) else px
+    spec = TC.z_spec(px, fit, trades, tf, **zkw)
+    data = {s["id"]: s["data"] for s in spec["series"]}
+    markers = {s["id"]: s["markers"] for s in spec["series"] if s.get("markers")}
+    z = data.get("z") or {"t": []}
+    step_s = TC.TF_SECONDS[tf]
+    first_close = (int(px["ts"].iloc[0]) // 1000 + step_s) if len(px) else None
+    # nothing older: no bars, no Z (before the model's first fit), or the first fit or bar is inside this piece
+    done = data_starts or not z["t"] or first_close is None or z["t"][0] > first_close
+    return {"before": int(before_s), "series": data, "markers": markers, "done": bool(done),
+            "first": int(z["t"][0]) if z["t"] else None}

@@ -13,7 +13,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -268,6 +271,92 @@ def prefetch_candles_from(symbols: tuple[str, ...], tf: str, start_ms: int) -> N
     start = _older_start(tf, start_ms)
     for sym in symbols:
         swr.warm(("older", sym, tf, start), lambda s=sym: _older(s, tf, start))
+
+
+# ---------------------------------------------------------------- older history, on demand
+# The Pair desk's Spread Z loads its older history while the user scrolls left (js/chart.js asks for the
+# bars before the earliest one it has). Candles come in fixed blocks of PER_REQUEST bars aligned in time,
+# one request each, kept in memory: closed candles never change. The dashboard shares its IP with the
+# bots, so these requests have a budget (OLDER_PER_MIN, about 5% of Binance's weight limit).
+OLDER_PER_MIN = 20
+OLDER_KEEP = 300  # blocks in memory (~60 kB each)
+_older_lock = threading.Lock()
+_older_blocks: OrderedDict = OrderedDict()  # (symbol, tf, start) -> DataFrame
+_older_budget = {"tokens": float(OLDER_PER_MIN), "at": time.monotonic()}
+_older_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="older")
+
+
+def _older_token() -> bool:
+    """One request from the budget (refilled continuously, OLDER_PER_MIN a minute)."""
+    with _older_lock:
+        now = time.monotonic()
+        b = _older_budget
+        b["tokens"] = min(float(OLDER_PER_MIN), b["tokens"] + (now - b["at"]) * OLDER_PER_MIN / 60)
+        b["at"] = now
+        if b["tokens"] < 1:
+            return False
+        b["tokens"] -= 1
+        return True
+
+
+def older_start(tf: str, end_ms: int) -> int:
+    """Where the older candles before ``end_ms`` start: the block holding the bar before it, and the block
+    before that too when this one would give fewer than a quarter of a block."""
+    span = PER_REQUEST * TF_MS[tf]
+    start = (int(end_ms) - 1) // span * span
+    if (int(end_ms) - start) // TF_MS[tf] < PER_REQUEST // 4:
+        start -= span
+    return start
+
+
+def _older_block(symbol: str, tf: str, start: int) -> pd.DataFrame | None:
+    key = (symbol, tf, int(start))
+    with _older_lock:
+        if key in _older_blocks:
+            _older_blocks.move_to_end(key)
+            return _older_blocks[key]
+    ex = exchange()
+    if ex is None or not _older_token():
+        return None
+    step = TF_MS[tf]
+    end = int(start) + PER_REQUEST * step
+    try:
+        rows = ex.fetch_ohlcv(symbol, tf, since=int(start), limit=PER_REQUEST)
+    except Exception as exc:
+        log.warning("older candles for %s unavailable: %s", symbol, exc)
+        return None
+    df = _frame(rows or [])
+    df = df[(df["ts"] >= int(start)) & (df["ts"] < end)].reset_index(drop=True)
+    if end <= ex.milliseconds() - step:  # every bar of the block has closed: keep it
+        with _older_lock:
+            _older_blocks[key] = df
+            while len(_older_blocks) > OLDER_KEEP:
+                _older_blocks.popitem(last=False)
+    return df
+
+
+def older_candles(symbol: str, tf: str, end_ms: int) -> pd.DataFrame | None:
+    """Closed candles from ``older_start(tf, end_ms)`` up to ``end_ms`` (exclusive), oldest first; an empty
+    frame before the symbol was listed, None when Binance did not answer or the budget is spent."""
+    start = older_start(tf, end_ms)
+    span = PER_REQUEST * TF_MS[tf]
+    parts = []
+    for b in range(start, int(end_ms), span):
+        df = _older_block(symbol, tf, b)
+        if df is None:
+            return None
+        parts.append(df)
+    out = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+    return out[out["ts"] < int(end_ms)].reset_index(drop=True)
+
+
+def older_pair(symbols: tuple[str, str], tf: str, end_ms: int) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """``older_candles`` of both legs, fetched at once; None unless both answered."""
+    if exchange() is None:
+        return None
+    a, b = (_older_pool.submit(older_candles, sym, tf, end_ms) for sym in symbols)
+    ca, cb = a.result(), b.result()
+    return None if ca is None or cb is None else (ca, cb)
 
 
 def prefetch_books(symbols: tuple[str, ...], limit: int = 50) -> None:

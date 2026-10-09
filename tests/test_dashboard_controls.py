@@ -42,6 +42,48 @@ def test_paused_pair_does_not_enter_but_still_exits(tmp_path):
     assert store.kv_get("entries_paused") is True and store.kv_get("paused_pairs") == []
 
 
+def test_paused_coin_stops_automatic_entries_of_its_pairs_but_not_manual_orders(tmp_path):
+    rig = Rig(tmp_path)
+
+    async def go():
+        eng, feed, store = rig.engine([spec()])
+        await feed.backfill()
+        rig.quote(feed)
+        proc = CommandProcessor(store, eng, RiskManager(eng.cfg.risk), max_age_s=120)
+        ids = [submit_command(rig.db, "pause_coin", coin="ZZZ"),  # no pair trades it
+               submit_command(rig.db, "pause_coin", coin="bbb")]
+        store.conn.execute("UPDATE commands SET ts=?", (feed.now_ms(),))
+        assert await proc.poll() == 2
+        res = {r["id"]: r for r in store.query("SELECT * FROM commands")}
+        assert [res[i]["status"] for i in ids] == ["rejected", "done"] and "1 pair(s) with BBB" in res[ids[1]]["result"]
+        assert eng.paused_coins == {"BBB"} and store.kv_get("paused_coins") == ["BBB"]
+        await rig.step(eng, feed, rig.bar)  # a clear entry signal ...
+        assert eng.pairs[0].strat.side == FLAT  # ... is ignored while BBB is paused
+        ok, _ = await eng.open_pair("AAA_BBB", LONG)  # a manual order still goes
+        assert ok
+        await eng.wait_background()
+        assert eng.pairs[0].strat.side == LONG
+        assert json.loads(store.query("SELECT payload FROM events WHERE kind='manual_open'")[0]["payload"])["paused"]
+        await eng.close_pair("AAA_BBB")
+        store.close()
+
+    asyncio.run(go())
+
+    async def restart():  # the pause survives a restart, and a resume lifts it
+        eng, feed, store = rig.engine([spec()])
+        assert eng.paused_coins == {"BBB"}
+        proc = CommandProcessor(store, eng, RiskManager(eng.cfg.risk), max_age_s=120)
+        await feed.backfill()
+        cid = submit_command(rig.db, "resume_coin", coin="BBB")
+        store.conn.execute("UPDATE commands SET ts=?", (feed.now_ms(),))
+        await proc.poll()
+        assert store.query("SELECT status FROM commands WHERE id=?", (cid,))[0]["status"] == "done"
+        assert eng.paused_coins == set() and store.kv_get("paused_coins") == []
+        store.close()
+
+    asyncio.run(restart())
+
+
 def test_commands_from_the_dashboard(tmp_path):
     rig = Rig(tmp_path)
     open_then_crash(rig)  # the pair holds a long position
@@ -303,6 +345,33 @@ def test_what_if_reaches_the_lab_and_is_applied_through_a_command(tmp_path, monk
     cmd = StateStore(rig.db).pending_commands()
     assert [(c["kind"], c["pair_id"]) for c in cmd] == [("set_params", "AAA_BBB")]
     assert json.loads(cmd[0]["payload"]) == {"lookback": L, "z_entry": 3.0, "z_exit": 0.5, "kalman_delta": None}
+
+
+def test_pause_by_coin_on_risk_and_controls(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    rig = _populated(tmp_path)  # AAA_BBB holds a long spread: long AAA, short BBB
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/controls.py").run()
+    assert at.selectbox(key="ctl_coin").options == ["AAA · 1 pair · long in 1", "BBB · 1 pair · short in 1"]
+    at.selectbox(key="ctl_coin").set_value("BBB").run()
+    at.button(key="ctl_coin_pause").click().run()
+    assert not at.exception, at.exception
+    store = StateStore(rig.db)
+    cmd = store.pending_commands()
+    assert [(c["kind"], c["pair_id"], json.loads(c["payload"])) for c in cmd] == [("pause_coin", None, {"coin": "BBB"})]
+
+    store.kv_set("paused_coins", ["BBB"])  # what the bot stores once it has run the command
+    at = _app(tmp_path, monkeypatch).run()
+    at.switch_page("ui/views/controls.py").run()
+    assert not at.exception, at.exception
+    assert at.selectbox(key="ctl_coin").value == "BBB"  # paused coins come first
+    assert at.button(key="ctl_coin_resume").label == "Resume BBB"
+    assert "BBB paused" in at.dataframe[0].value["status"].iloc[0]
+    at.button(key="ctl_coin_resume_BBB").click().run()
+    assert [c["kind"] for c in store.pending_commands()][-1] == "resume_coin"
+    at.switch_page("ui/views/pair.py").run()  # the Pair desk says why the bot will not enter
+    assert not at.exception, at.exception
+    assert any("**BBB** paused for automatic entries" in c.value for c in at.caption)
 
 
 def test_pair_button_queues_a_command(tmp_path, monkeypatch):

@@ -7,6 +7,8 @@ position card, the pair's profile (instruments, relationship statistics, track r
 the strategy parameters (calibrated / in use / what-if).
 """
 
+import time
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -45,9 +47,11 @@ def _state(d: dict) -> tuple[K.PairState | None, dict]:
     return K.load_state(d, ctx, pid, p["pending"]), p
 
 
-def _reductions(p: dict) -> list[int]:
+def _reductions(p: dict) -> list[tuple[int, str]]:
+    """Manual reductions and additions of the position: (time, marker text)."""
     r = p.get("reductions")
-    return [] if r is None or r.empty else [int(x) for x in r["ts"]]
+    return [] if r is None or r.empty else [(int(t), "ADD" if k == "position_added" else "REDUCE")
+                                            for t, k in zip(r["ts"], r["kind"])]
 
 
 def _open_entry_ms(s: K.PairState, trades: pd.DataFrame) -> int | None:
@@ -62,7 +66,47 @@ def _reach_ms(tf: str) -> int:
     return D.now_ms() - M.REACH_BACK[tf] * M.TF_MS[tf]
 
 
-def _chart(s: K.PairState, p: dict, trades: pd.DataFrame, view: str, tf: str) -> dict:
+# Spread Z timeframes whose older history loads while the user scrolls left (1d shows it all at once).
+OLDER_TFS = ("1m", "5m", "15m", "1h", "4h")
+OLDER_SEND_S = 10  # an older piece rides along this long after it was asked for (the browser keeps it)
+
+
+def _model_history(s: K.PairState, use) -> pd.DataFrame:
+    return HI.model_history(str(ctx.data_dir), s.sym_a, s.sym_b, pid, int(use.lookback), use.kalman_delta,
+                            s.scfg.get("kalman_history", 8760), s.scfg.get("kalman_outlier_z", 4.0),
+                            int(s.scfg.get("kalman_max_skips", 48)))
+
+
+def _older_request(rev: str) -> dict | None:
+    """The chart's latest ask for older bars (js/chart.js), while it is fresh."""
+    r = st.session_state.get("_older_req")
+    return r if r and r.get("rev") == rev and time.time() - r["at"] < OLDER_SEND_S else None
+
+
+def _older(s: K.PairState, trades: pd.DataFrame, tf: str, before_s: int, use, zkw: dict,
+           full: tuple[pd.DataFrame, pd.DataFrame] | None) -> dict:
+    """The Spread Z before ``before_s`` (the earliest point the chart has). ``full``: (closes, fit) of
+    1h/4h, the whole history already in memory; intraday bars come from Binance."""
+    step = M.TF_MS[tf]
+    end_ms = int(before_s) * 1000 - step  # the open time of the chart's earliest bar
+    if full is not None:
+        px, fit = full
+        older = px[px["ts"] < end_ms]
+        piece = older.tail(HI.OLDER_BARS[tf])
+        return HI.older_piece(piece, fit, trades, tf, before_s, zkw, data_starts=len(piece) == len(older))
+    got = M.older_pair((s.sym_a, s.sym_b), tf, end_ms)
+    if got is None:  # Binance did not answer, or the budget for older bars is spent: the chart asks again
+        return {"before": int(before_s), "retry": True}
+    ca, cb = got
+    start = M.older_start(tf, end_ms)
+    # a leg listed after the start of this piece: nothing older exists
+    listed = ca.empty or cb.empty or int(max(ca["ts"].iloc[0], cb["ts"].iloc[0])) > start
+    fit, _ = HI.extend(D.load_pair(str(ctx.db_path), D.version(ctx.db_path), pid, 0)["fit"], None,
+                       _model_history(s, use), tf)
+    return HI.older_piece(TC.closes(ca, cb), fit, trades, tf, before_s, zkw, data_starts=listed)
+
+
+def _chart(s: K.PairState, p: dict, trades: pd.DataFrame, view: str, tf: str, rev: str = "") -> dict:
     use, wi = ctx.live_params(pid), ctx.what_if_for(pid)
     max_z = s.scfg.get("max_entry_z")
     if view == "Model":
@@ -77,19 +121,25 @@ def _chart(s: K.PairState, p: dict, trades: pd.DataFrame, view: str, tf: str) ->
         ca, cb = M.candles(s.sym_a, tf, CANDLES[tf]), M.candles(s.sym_b, tf, CANDLES[tf])
     if view == "Spread Z":
         px, fit = TC.closes(ca, cb), p["fit"]
+        full = None
         if tf not in TC.INTRADAY:  # the whole history: the archive (from 6/2023) before the bot's own records
             fit = D.load_pair(str(ctx.db_path), D.version(ctx.db_path), pid, 0)["fit"]
-            hist = HI.model_history(str(ctx.data_dir), s.sym_a, s.sym_b, pid, int(use.lookback), use.kalman_delta,
-                                    s.scfg.get("kalman_history", 8760), s.scfg.get("kalman_outlier_z", 4.0),
-                                    int(s.scfg.get("kalman_max_skips", 48)))
-            fit, px = HI.extend(fit, px, hist, tf)
+            fit, px = HI.extend(fit, px, _model_history(s, use), tf)
             if px.empty:  # Binance did not answer: every close from the model rows
                 px = TC.closes_from_fit(fit, tf)
+            full = (px, fit)
             px = px.tail(HISTORY_BARS[tf])
-        return TC.z_spec(px, fit, trades, tf, z_entry=use.z_entry, z_exit=use.z_exit,
-                         exit_plan=s.strat.get("z_exit_override"), what_if=(wi.z_entry, wi.z_exit), max_entry_z=max_z,
-                         fit_now=s.fit, symbols=(s.id_a, s.id_b), now_ms=D.now_ms(), side=s.side,
-                         entered=s.row["Z at entry"], reductions=_reductions(p))
+        zkw = dict(z_entry=use.z_entry, z_exit=use.z_exit, exit_plan=s.strat.get("z_exit_override"),
+                   what_if=(wi.z_entry, wi.z_exit), max_entry_z=max_z, fit_now=s.fit, symbols=(s.id_a, s.id_b),
+                   now_ms=D.now_ms(), side=s.side, entered=s.row["Z at entry"], reductions=_reductions(p))
+        older = tf in OLDER_TFS
+        spec = TC.z_spec(px, fit, trades, tf, **zkw)
+        if older:
+            spec["older"] = {"enabled": True}
+            req = _older_request(rev)
+            if req:
+                spec["older_chunk"] = _older(s, trades, tf, int(req["before"]), use, zkw, full)
+        return spec
     if view == "Legs":
         entry = (float(s.book["entry_px_a"]), float(s.book["entry_px_b"])) if s.side else None
         return TC.legs_spec(ca, cb, (s.a, s.b), (s.id_a, s.id_b), (s.digits_a, s.digits_b), tf, trades, entry,
@@ -156,6 +206,12 @@ desk()
 # The chart with its own controls: a click on a view or a timeframe reruns only this part (~0.3 s),
 # not the whole page. The book and the tape are live in the browser; their data (fit, position)
 # follows here every few seconds.
+def _ask_older(ask: dict | None) -> None:
+    """The chart asked for the bars before its earliest one (it runs before the fragment reruns)."""
+    if isinstance(ask, dict) and ask.get("rev") and ask.get("before"):
+        st.session_state["_older_req"] = {"rev": str(ask["rev"]), "before": int(ask["before"]), "at": time.time()}
+
+
 @st.fragment(run_every=W.every(ctx.refresh))
 def chart_panel() -> None:
     W.pulse(ctx.db_path, ctx.refresh, "pulse_pair_chart_panel")
@@ -171,10 +227,11 @@ def chart_panel() -> None:
     trades = d["trades"][d["trades"]["pair_id"] == pid] if not d["trades"].empty else pd.DataFrame()
     left, right = st.columns([8, 4], gap="medium")
     with left:
-        spec = _chart(s, p, trades, view, tf)
+        rev = f"{pid}-{view}-{tf}-{ctx.window}"
+        spec = _chart(s, p, trades, view, tf, rev)
         if not spec["series"]:
             st.info("No data for this chart yet (Binance unreachable, or no model history before the bot's first bar).")
-        TV.chart(spec, key="pd_chart", rev=f"{pid}-{view}-{tf}-{ctx.window}")
+        TV.chart(spec, key="pd_chart", rev=rev, on_older=_ask_older)
         entry = _open_entry_ms(s, trades) if view != "Model" and tf in M.REACH_BACK else None
         if entry is not None and entry < _reach_ms(tf):
             st.caption(f"The position's entry ({D.clock(entry, '%d/%m %H:%M')}) is older than the {tf} chart reaches "
@@ -230,6 +287,10 @@ def trade() -> None:
         elif c1.button("Pause automatic entries", key=f"pause_{pid}", width="stretch"):
             W.send(ctx.db_path, "pause_pair", pid)
         c2.caption("A pause stops the bot's own entries for this pair; exits, stops and your manual orders still work.")
+        coins_off = [c for c in (s.row["a"], s.row["b"]) if c in set(kv.get("paused_coins", []) or [])]
+        if coins_off:
+            st.caption(f"❚❚ **{' and '.join(coins_off)}** paused for automatic entries in every pair "
+                       "(Risk & controls). Your manual orders still work.")
     with right:
         heading("Position")
         K.position_card(s)

@@ -35,6 +35,9 @@ CSS = """
 .cp-leg b { color: #d7dce5; font-weight: 600; margin-left: 3px; }
 .cp-tv-status { position: absolute; inset: 40% 0 auto 0; text-align: center; color: #8b93a5; font-size: 12px; }
 .cp-tv-status:empty { display: none; }
+.cp-tv-older { position: absolute; left: 6px; bottom: 30px; z-index: 3; font-size: 11px; color: #8b93a5;
+  background: rgba(11,14,20,.75); border-radius: 4px; padding: 1px 6px; pointer-events: none; }
+.cp-tv-older:empty { display: none; }
 
 .cp-mk { font-variant-numeric: tabular-nums; color: #d7dce5; font-size: 12px; }
 .cp-mk .sub { color: #8b93a5; font-size: 11px; font-weight: 400; }
@@ -97,6 +100,22 @@ CSS = """
 .wl-pnl { text-align: right; } .wl-pnl.pos { color: #2ebd85; } .wl-pnl.neg { color: #f6465d; }
 @media (pointer: coarse) { .wl-row { padding: 10px 6px; font-size: 14px; } .wl-h { padding-top: 14px; } }
 .wl-empty { color: #4b5468; padding: 2px 8px; }
+.wl-row.kb { background: #1a2131; box-shadow: inset 0 0 0 1px #3a4458; }
+.wl-q { position: relative; margin: 6px 0 2px 0; }
+.wl-q input { width: 100%; box-sizing: border-box; background: #131925; border: 1px solid #232b3a; border-radius: 6px;
+  color: #d7dce5; font: inherit; font-size: 12.5px; padding: 6px 28px 6px 9px; outline: none; user-select: text; }
+.wl-q input::placeholder { color: #4b5468; }
+.wl-q input:focus { border-color: #f0b429; }
+.wl-q kbd, .wl-q button { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
+.wl-q kbd { color: #4b5468; border: 1px solid #232b3a; border-radius: 4px; font-family: inherit; font-size: 10.5px; line-height: 1; padding: 2px 5px;
+  pointer-events: none; }
+.wl-q button { display: none; background: none; border: 0; color: #8b93a5; font-size: 16px; line-height: 1;
+  padding: 2px 4px; cursor: pointer; }
+.wl-q button:hover { color: #d7dce5; }
+.wl-q.has kbd, .wl-q input:focus ~ kbd { display: none; }
+.wl-q.has button { display: block; }
+.wl-none { color: #8b93a5; padding: 12px 8px 4px 8px; }
+@media (pointer: coarse) { .wl-q input { font-size: 16px; padding: 9px 34px 9px 10px; } .wl-q kbd { display: none; } }
 .wl-foot { color: #4b5468; font-size: 10.5px; line-height: 1.45; margin: 10px 2px 0 2px; }
 """
 
@@ -128,9 +147,20 @@ def ensure_static_files() -> None:
         shutil.copyfile(src, target)
 
 
-def chart(spec: dict, key: str, rev: str | None = None) -> None:
-    """Show a chart spec (see ui/tvcharts.py); reruns with the same key update it in place."""
-    _renderer("chart")(key=key, data={"spec": spec, "rev": rev or key, "tz": D.TZ_NAME}, width="stretch")
+def _trigger(key: str, event: str):
+    """A component's trigger value, from session state (inside its ``on_<event>_change`` callback)."""
+    try:
+        v = st.session_state.get(key)
+        return v.get(event) if hasattr(v, "get") else getattr(v, event, None)
+    except Exception:  # not there yet
+        return None
+
+
+def chart(spec: dict, key: str, rev: str | None = None, on_older: Callable | None = None) -> None:
+    """Show a chart spec (see ui/tvcharts.py); reruns with the same key update it in place.
+    ``on_older(ask)``: called before the rerun when the chart asks for older bars (``spec["older"]``)."""
+    kw = {"on_older_change": lambda: on_older(_trigger(key, "older"))} if on_older else {}
+    _renderer("chart")(key=key, data={"spec": spec, "rev": rev or key, "tz": D.TZ_NAME}, width="stretch", **kw)
 
 
 def watchlist(rows: list[dict], focus: str | None, key: str = "watchlist") -> str | None:

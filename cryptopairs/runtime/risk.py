@@ -49,11 +49,11 @@ class RiskManager:
         total_equity: float,
         quotes_ok: bool,
     ) -> Decision:
-        if order.kind != "open":
+        if order.kind not in ("open", "add"):
             return Decision(True)  # closing or reducing risk is always allowed
         if self.kill_switch:
             return Decision(False, "kill switch engaged")
-        if open_pairs >= self.cfg.max_open_pairs:
+        if order.kind == "open" and open_pairs >= self.cfg.max_open_pairs:
             return Decision(False, f"max open pairs ({self.cfg.max_open_pairs}) reached")
         if self.cfg.require_quotes_for_entry and not quotes_ok:
             return Decision(False, "no fresh quotes")

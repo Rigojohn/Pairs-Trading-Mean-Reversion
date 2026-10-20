@@ -173,13 +173,34 @@ def market_data(pairs: pd.DataFrame) -> dict[str, dict]:
     return out
 
 
-def watchlist_rows(rows: pd.DataFrame, pending: set[str]) -> list[dict]:
-    """Rows for the sidebar watchlist: open positions by PnL, then flat pairs nearest to a signal."""
+def last_trades(trades: pd.DataFrame | None) -> dict[str, dict]:
+    """Per pair, its most recent closed trade: PnL with fees and funding (as in the Journal), when and why it closed."""
+    if trades is None or trades.empty:
+        return {}
+    t = trades.assign(exit_ts=pd.to_numeric(trades["exit_ts"], errors="coerce"),
+                      pnl=pd.to_numeric(trades["pnl"], errors="coerce")).dropna(subset=["exit_ts", "pnl"])
+    t = t.assign(ts=t["exit_ts"].map(D.event_ms))
+    out = {}
+    for r in t.sort_values(["ts", "id"]).itertuples():  # the newest of each pair is written last
+        why = r.reason if isinstance(r.reason, str) else "signal"
+        out[r.pair_id] = {"pnl": float(r.pnl), "ts": int(r.ts),
+                          "why": D.EXIT_LABEL.get(why, why.replace("_", " ")).split(" · ")[0]}
+    return out
+
+
+def watchlist_rows(rows: pd.DataFrame, pending: set[str], trades: pd.DataFrame | None = None) -> list[dict]:
+    """Rows for the sidebar watchlist: open positions by PnL, then flat pairs nearest to a signal.
+    An open position shows its unrealized PnL; a flat pair the PnL of its last closed trade (``trades``)."""
     num = lambda v: float(v) if v is not None and np.isfinite(v) else None  # noqa: E731
+    last = last_trades(trades)
     out = []
     for r in rows.to_dict("records"):
+        lt = last.get(r["pair"])
+        tip = (f"last trade {lt['pnl']:+.2f} · closed {D.to_time(lt['ts']):%d/%m %H:%M} · {lt['why']}"
+               if lt else "no closed trade yet")
         out.append({"id": r["pair"], "a": r["a"], "b": r["b"], "side": int(r["side"]), "z": num(r["Z now"]),
                     "ze": float(r["Z entry"]), "to_entry": num(r.get("to entry")), "pnl": num(r["PnL"]),
+                    "last": lt["pnl"] if lt else None, "last_tip": tip,
                     "upnl": num(r["unrealized"]), "status": r["status"],
                     "paused": bool(r["paused"]) or bool(r.get("coin paused")),
                     "override": bool(r["override"]), "plan": bool(r.get("exit plan")), "busy": r["pair"] in pending})
@@ -198,7 +219,7 @@ def _watchlist(db_path: Path, since_ms: int, refresh: int, focus: str) -> None:
         rows = D.pair_rows(d, D.session_cfg(d))
         pending = set(D.query(str(db_path), "SELECT DISTINCT pair_id FROM orders WHERE status='pending'")
                       .get("pair_id", pd.Series(dtype=str)))
-        pick = TV.watchlist(watchlist_rows(rows, pending), focus)
+        pick = TV.watchlist(watchlist_rows(rows, pending, d["trades"]), focus)
         if pick:  # every click, also on the pair already in focus: it opens that pair's desk
             st.session_state["_focus_pick"] = pick
             st.session_state["_open_desk"] = True

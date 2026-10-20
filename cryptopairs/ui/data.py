@@ -468,7 +468,8 @@ def trade_view(t: pd.DataFrame) -> pd.DataFrame:
 
 
 EXIT_LABEL = {"signal": "exit signal · hourly", "realtime": "exit signal · instant", "stop_loss": "stop-loss",
-              "catastrophe": "catastrophe stop", "time_stop": "time stop", "manual_close": "manual", "manual": "manual"}
+              "stop_loss_intrabar": "stop-loss", "stop_catastrophe": "catastrophe stop", "catastrophe": "catastrophe stop",
+              "stop_z": "Z stop", "time_stop": "time stop", "manual_close": "manual", "manual": "manual"}
 
 
 def journal(d: dict, rows: pd.DataFrame, realtime: pd.DataFrame | None = None) -> pd.DataFrame:

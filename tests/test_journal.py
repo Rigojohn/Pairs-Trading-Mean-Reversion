@@ -25,15 +25,17 @@ def test_journal_reasons_exit_z_and_open_trades():
         _trade(2, "A_B", -1, T0 + 6 * H, T0 + 7 * H + 1234, "signal", (1.0, 1.0), -1.0),  # instant exit
         _trade(3, "C_D", 1, T0 + 2 * H, T0 + 3 * H + 99, "stop_loss", (1.0, 1.3), -20.0),
         _trade(4, "C_D", -1, T0 + 8 * H, entry_reason="manual"),                          # open
+        _trade(5, "E_F", 1, T0 + H, T0 + 2 * H + 77, "stop_catastrophe", (1.0, 1.5), -36.0),  # the 35% stop
     ])
     events = pd.DataFrame({"ts": [T0 + 7 * H + 1234], "pair_id": ["A_B"], "kind": ["realtime_exit"]})
     rows = pd.DataFrame({"pair": ["C_D"], "side": [-1], "unrealized": [1.5], "Z now": [0.7]})
     j = D.journal({"trades": trades, "events": events}, rows).set_index("id")
 
-    assert list(j.index) == [4, 2, 3, 1]  # newest entry first
+    assert list(j.index) == [4, 2, 3, 5, 1]  # newest entry first
     assert j.loc[1, "exit reason"] == "exit signal · hourly"
     assert j.loc[2, "exit reason"] == "exit signal · instant"
     assert j.loc[3, "exit reason"] == "stop-loss"
+    assert j.loc[5, "exit reason"] == "catastrophe stop"
     want = (math.log(1.2) - 0.1 - 0.8 * math.log(1.1)) / 0.05
     assert abs(j.loc[1, "Z exit / now"] - want) < 1e-9
     assert j.loc[1, "fees"] == -0.2 and j.loc[1, "funding"] == 0.05  # + received, − paid

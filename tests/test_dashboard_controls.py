@@ -494,9 +494,19 @@ def test_watchlist_puts_open_positions_first_and_a_pick_moves_the_focus(tmp_path
         {"pair": "F2", "a": "E", "b": "F", "side": 0, "Z now": 0.1, "Z entry": 2.0, "to entry": 1.9, "PnL": 0.0,
          "unrealized": 0.0, "status": "", "paused": True, "override": False, "exit plan": False},
     ])
-    wl = watchlist_rows(rows, pending={"O1"})
+    ms = lambda s: int(pd.Timestamp(s, tz="UTC").value // 1_000_000)  # noqa: E731
+    trades = pd.DataFrame([  # F1: the newer trade (a stop between bars) is the one shown; O1 is still open
+        {"id": 1, "pair_id": "F1", "exit_ts": ms("2026-10-15 09:23"), "reason": "stop_loss", "pnl": -2.5},
+        {"id": 2, "pair_id": "F1", "exit_ts": ms("2026-10-10 10:00"), "reason": "signal", "pnl": 5.0},
+        {"id": 3, "pair_id": "O1", "exit_ts": None, "reason": None, "pnl": None},
+    ])
+    wl = watchlist_rows(rows, pending={"O1"}, trades=trades)
     assert [r["id"] for r in wl] == ["O1", "F1", "F2"] and wl[0]["busy"] and wl[0]["plan"] and wl[2]["paused"]
     assert wl[1]["to_entry"] == 0.1 and wl[1]["z"] == 1.9
+    # a flat pair shows its last closed trade, not the pair's total PnL
+    assert wl[1]["last"] == -2.5 and wl[1]["last_tip"] == "last trade -2.50 · closed 15/10 12:23 · stop-loss"
+    assert wl[2]["last"] is None and wl[0]["last"] is None
+    assert watchlist_rows(rows, pending=set())[1]["last"] is None  # no trades table: nothing to show
 
     _populated(tmp_path)
     at = _app(tmp_path, monkeypatch)

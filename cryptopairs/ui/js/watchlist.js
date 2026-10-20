@@ -11,13 +11,14 @@ function cpWlRow(r, focus) {
   const near = r.side ? "" : !isFinite(r.to_entry) ? "" : r.to_entry <= 0 ? "sig" : r.to_entry <= 0.25 ? "near" : "";
   const fill = isFinite(r.z) && r.ze > 0 ? Math.min(100, 100 * Math.abs(r.z) / (1.25 * r.ze)) : 0;
   const mark = r.ze > 0 ? 100 / 1.25 : 0;
-  const pnl = r.side ? r.upnl : r.pnl;
+  const pnl = r.side ? r.upnl : r.last;  // open: unrealized now; flat: the last closed trade
   const pcls = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
+  const tip = r.side || !r.last_tip ? "" : ` title="${r.last_tip}"`;
   const flags = [r.paused ? "❚❚" : "", r.override ? "✎" : "", r.busy ? "⟳" : "", r.plan ? "⚑" : ""].join("");
   return `<div class="wl-row ${r.id === focus ? "on" : ""}" data-id="${r.id}" title="${r.id}${r.status ? " · " + r.status : ""}">`
     + `${side}<span class="wl-name">${r.a}<i>/</i>${r.b}<em>${flags}</em></span>`
     + `<span class="wl-z ${near}">${z}<b class="wl-bar"><i style="width:${fill.toFixed(0)}%"></i><u style="left:${mark}%"></u></b></span>`
-    + `<span class="wl-pnl ${pcls}">${isFinite(pnl) ? (pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—"}</span></div>`;
+    + `<span class="wl-pnl ${pcls}"${tip}>${pnl !== null && isFinite(pnl) ?(pnl >= 0 ? "+" : "") + pnl.toFixed(2) : "—"}</span></div>`;
 }
 
 // The click goes out at once through the relay component (js/relay.js), which sits outside the fragment that
@@ -145,11 +146,12 @@ function cpWlRender(el) {
   } else {
     html = (words.length && !open.length ? "" : head("Open positions", open, all.filter((r) => r.side), "uPnL")
         + (open.map(row).join("") || '<div class="wl-empty">none</div>'))
-      + (words.length && !flat.length ? "" : head("Watching", flat, all.filter((r) => !r.side), "PnL")
+      + (words.length && !flat.length ? "" : head("Watching", flat, all.filter((r) => !r.side), "Last trade")
         + flat.map(row).join(""));
   }
   el._list.innerHTML = html
-    + '<div class="wl-foot">Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
+    + '<div class="wl-foot">Last trade: PnL of the pair\'s last closed trade, fees and funding included (hover for when) · '
+    + 'Z bar: |Z| vs the entry threshold (tick) · amber = within 0.25 of a signal · '
     + '❚❚ auto entries paused · ✎ override · ⚑ exit plan · ⟳ executing</div>';
 }
 

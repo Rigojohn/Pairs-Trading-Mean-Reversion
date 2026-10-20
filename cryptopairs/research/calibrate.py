@@ -66,9 +66,20 @@ def select_best(table: pd.DataFrame, selection: str = "argmax", min_trades: int 
               (one step in lookback, z_entry or z_exit). A configuration that only
               works in isolation is likely a lucky fit; the median ignores a single
               spike, so neither the spike nor its neighbours win. Untraded points count as 0.
+    sortino_dd: smallest sum of two ranks, the training Sortino (1 = highest) and the
+              training max drawdown (1 = shallowest), average ranks for ties; a tie in
+              the sum goes to the higher Sortino. No weights or thresholds to choose.
     """
     if table.empty:
         return None
+    if selection == "sortino_dd":
+        ok = table[(table["Trades"] >= min_trades) & table["Sortino"].notna() & table["MaxDD"].notna()]
+        if ok.empty:
+            return None
+        rank_sum = (ok["Sortino"].rank(ascending=False, method="average")
+                    + ok["MaxDD"].rank(ascending=False, method="average"))  # MaxDD <= 0: -5% beats -20%
+        ok = ok.assign(RankSum=rank_sum)
+        return ok.sort_values(["RankSum", "Sortino"], ascending=[True, False], kind="mergesort").iloc[0].to_dict()
     ok = table[(table["Trades"] >= min_trades) & table["Sharpe"].notna()]
     if ok.empty:
         return None

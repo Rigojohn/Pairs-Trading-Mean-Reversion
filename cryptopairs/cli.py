@@ -183,6 +183,39 @@ def cmd_experiments(cfg: AppConfig, args) -> None:
     print("\n" + text)
 
 
+def cmd_walkforward(cfg: AppConfig, args) -> None:
+    from cryptopairs.research import walkforward as wf
+
+    out, data = Path(args.out), args.data
+    out.mkdir(parents=True, exist_ok=True)
+    folds = wf.month_folds(args.first, args.last)
+    cfg.research.workers = args.workers
+    if args.action == "data":
+        df = wf.prepare_data("data", data, last_month=args.last)
+        log.info("data in %s: %d symbols (list in %s/meta/universe.csv)", data, len(df), data)
+        return
+    if args.action == "reproduce":
+        df = wf.reproduce(cfg, "data", out_dir=out / "reproduce", workers=args.workers)
+        print(df.to_string(index=False))
+        return
+    if args.action == "poison":
+        fold = next(f for f in folds if f.month == args.month)
+        res = wf.poison_check(cfg, fold, data, out, out / "_poison_data")
+        (out / f"poison_{fold.month}.json").write_text(json.dumps(res, indent=2))
+        print(json.dumps(res, indent=2))
+        return
+    (out / "config.json").write_text(json.dumps(wf.config_record(cfg), indent=2, default=str))
+    if args.action in ("select", "run"):
+        wf.run_selection(cfg, folds, data, out)
+    if args.action in ("minutes", "run"):
+        wf.prefetch_minutes(folds, data, out)
+    if args.action in ("simulate", "run"):
+        wf.run_simulation(cfg, folds, data, out, slots=args.slots, workers=args.workers)
+    if args.action in ("report", "simulate", "run"):
+        wf.report(cfg, folds, out)
+        print((out / "summary.txt").read_text())
+
+
 def cmd_backtest(cfg: AppConfig, args) -> None:
     from cryptopairs.core.strategy import PairParams
     from cryptopairs.research.backtest import run_backtest
@@ -368,6 +401,16 @@ def main(argv: list[str] | None = None) -> None:
     xp.add_argument("--out", default="runs/experiments")
     xp.add_argument("--only", nargs="*", help="variant name prefixes to run, e.g. V0 K1 K2")
 
+    wfp = sub.add_parser("walkforward", help="monthly walk-forward of bot B's recipe (research/walkforward.py)")
+    wfp.add_argument("action", choices=["data", "reproduce", "select", "minutes", "simulate", "report", "run", "poison"])
+    wfp.add_argument("--data", default="data_wf", help="the walk-forward's data folder (data/ is not touched)")
+    wfp.add_argument("--out", default="runs/walkforward_b")
+    wfp.add_argument("--first", default="2022-10", help="first month traded")
+    wfp.add_argument("--last", default="2026-09", help="last month traded")
+    wfp.add_argument("--slots", type=int, default=100, help="a new pair gets 1/slots of the equity")
+    wfp.add_argument("--workers", type=int, default=3)
+    wfp.add_argument("--month", help="poison: the month to select again without the future")
+
     b = sub.add_parser("backtest", help="backtest one pair")
     b.add_argument("a")
     b.add_argument("b")
@@ -422,7 +465,8 @@ def main(argv: list[str] | None = None) -> None:
     handler = {
         "download": cmd_download, "metadata": cmd_metadata, "funnel": cmd_funnel,
         "calibrate": cmd_calibrate, "test": cmd_test, "research": cmd_research,
-        "backtest": cmd_backtest, "paper": cmd_paper, "experiments": cmd_experiments, "status": cmd_status, "export": cmd_export,
+        "backtest": cmd_backtest, "paper": cmd_paper, "experiments": cmd_experiments, "walkforward": cmd_walkforward,
+        "status": cmd_status, "export": cmd_export,
         "reset-kill-switch": cmd_reset_kill_switch, "dashboard": cmd_dashboard, "alerts": cmd_alerts,
     }[args.command]
     handler(cfg, args)

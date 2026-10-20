@@ -194,6 +194,7 @@ class ResearchConfig:
     min_train_trades: int = 0
     # "argmax": best training Sharpe (paper). "smoothed": best average Sharpe of a grid
     # point and its neighbours, which favours parameters that are not a lucky spike.
+    # "sortino_dd": best sum of ranks of training Sortino and training max drawdown.
     selection: str = "argmax"
     # Cap how many selected pairs may share one coin (None = no cap, as in the paper).
     max_pairs_per_symbol: int | None = None

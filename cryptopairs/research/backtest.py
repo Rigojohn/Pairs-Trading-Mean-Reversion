@@ -32,6 +32,7 @@ class BacktestResult:
     fees: float = 0.0
     funding: float = 0.0
     deactivated: bool = False
+    cooldown_until: int = -1  # the strategy's cooldown at the end (set by the intrabar replay)
 
     def equity_frame(self) -> pd.DataFrame:
         return pd.DataFrame({"ts": self.ts, "equity": self.equity})
@@ -43,11 +44,23 @@ class BacktestResult:
         return performance(self.ts, self.equity, self.trades, self.fees, self.funding)
 
 
+def sortino(rets: np.ndarray) -> float:
+    """Annualized Sortino ratio of hourly simple returns, target 0: the mean over the root mean square of
+    the losing hours, where every hour counts in the mean (a flat hour adds 0). NaN without a losing hour."""
+    rets = np.asarray(rets, dtype=np.float64)
+    if rets.size < 2:
+        return math.nan
+    downside = math.sqrt(float(np.mean(np.minimum(rets, 0.0) ** 2)))
+    if not downside > 0:
+        return math.nan
+    return float(rets.mean() / downside * math.sqrt(HOURS_PER_YEAR))
+
+
 def performance(ts: np.ndarray, equity: np.ndarray, trades: list[dict], fees: float = 0.0, funding: float = 0.0) -> dict:
     """Annualized Sharpe (sqrt(8760) on hourly simple returns, as in the paper) and friends."""
     n = equity.shape[0]
     out = {
-        "Sharpe": math.nan, "AnnRet": math.nan, "AnnVol": math.nan, "TotalRet": math.nan,
+        "Sharpe": math.nan, "Sortino": math.nan, "AnnRet": math.nan, "AnnVol": math.nan, "TotalRet": math.nan,
         "MaxDD": math.nan, "Trades": len(trades), "WinRate": math.nan,
         "StopLosses": sum(1 for t in trades if str(t.get("reason", "")).startswith("stop")),
         "Fees": fees, "Funding": funding, "FinalEquity": float(equity[-1]) if n else math.nan,
@@ -62,6 +75,7 @@ def performance(ts: np.ndarray, equity: np.ndarray, trades: list[dict], fees: fl
         out["AnnVol"] = float(sd * math.sqrt(HOURS_PER_YEAR))
         if sd > 0:
             out["Sharpe"] = float(rets.mean() / sd * math.sqrt(HOURS_PER_YEAR))
+        out["Sortino"] = sortino(rets)
     out["TotalRet"] = float(equity[-1] / equity[0] - 1.0)
     years = (ts[-1] - ts[0]) / (3_600_000 * HOURS_PER_YEAR)
     if years > 0 and equity[-1] > 0:

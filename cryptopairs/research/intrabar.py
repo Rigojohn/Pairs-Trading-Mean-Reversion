@@ -135,8 +135,18 @@ def run_intrabar(
     rule: EntryRule,
     *,
     fits: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    entries_until_ms: int | None = None,
+    cooldown_until: int | None = None,
+    deactivation_base: float | None = None,
 ) -> BacktestResult:
-    """One pair over [start_ms, end_ms]; see the module docstring. Requires ``fill_on: next_open``."""
+    """One pair over [start_ms, end_ms]; see the module docstring. Requires ``fill_on: next_open``.
+
+    For the walk-forward (research/walkforward.py), where a pair's parameters change at month ends:
+    ``entries_until_ms``: no entry that would fill at or after this time; once the pair is flat after
+    it, the replay stops (an open position is managed to its exit, as the bot does with a pair that
+    leaves the list). ``cooldown_until`` carries a stop's cooldown over from the previous segment and
+    ``deactivation_base`` the equity the deactivation floor refers to (default: ``initial_equity``).
+    """
     if costs.fill_on != "next_open" or cfg.entry_rule != "fixed" or costs.long_leg != "perp":
         raise ValueError("intrabar replay supports fill_on next_open, entry_rule fixed and perp legs only")
     if cfg.funding_filter != "off" or cfg.funding_exit != "off" or costs.intrabar_stop:
@@ -156,7 +166,14 @@ def run_intrabar(
     use_funding = costs.funding
     allow_reentry = cfg.allow_same_bar_reentry
     strat = PairStrategy(params, cfg, initial_equity, round_trip_cost=2.0 * fee + 2.0 * cost, anchor=i0)
+    if cooldown_until is not None:
+        strat.cooldown_until = int(cooldown_until)
+    if deactivation_base is not None:
+        strat.initial_equity = float(deactivation_base)
     book = PairBook(cash=float(initial_equity))
+
+    def entries_open(fill_ts: int) -> bool:
+        return entries_until_ms is None or fill_ts < entries_until_ms
     maker_on = costs.maker_legs == 1
     mfee, adv = costs.maker_fee, costs.maker_adverse_bps * 1e-4
     urgent_reasons = STOP_REASONS | {"data_end"}
@@ -306,7 +323,7 @@ def run_intrabar(
                 break
             j = int(np.searchsorted(cand_ix, m))
             opened = False
-            while j < cand_ix.shape[0] and cand_ix[j] < last - 1:
+            while j < cand_ix.shape[0] and cand_ix[j] < last - 1 and entries_open(int(mts[cand_ix[j] + 1])):
                 c = int(cand_ix[j])
                 zb, zs = float(zb_flat[c]), float(zs_flat[c])
                 side = strat.check_entry(int(mts[c]) + MINUTE, i - 1, zb, zs)
@@ -381,16 +398,22 @@ def run_intrabar(
                             side = FLAT
                     elif rule.minute or rule.cap is not None:
                         side = FLAT  # no minute closing on the hour: the rule cannot be checked
-                if side != FLAT and not (data_ends_early and i == i1) and i < i1:
+                if side != FLAT and not (data_ends_early and i == i1) and i < i1 and entries_open(ts + HOUR):
                     pending = ("open", side, zb, zs, zx)
 
         equity_out[k] = book.equity(pa, pb)
+        if (entries_until_ms is not None and ts + HOUR >= entries_until_ms
+                and strat.side == FLAT and pending is None):
+            equity_out = equity_out[: k + 1]
+            break
 
     if current is not None:
         current.pop("funding_start", None)
         trades.append(current)
-    return BacktestResult(ts=data.ts[i0 : i1 + 1].copy(), equity=equity_out, trades=trades, fees=book.fees_paid,
-                          funding=book.funding_paid, deactivated=strat.deactivated)
+    n = equity_out.shape[0]
+    return BacktestResult(ts=data.ts[i0 : i0 + n].copy(), equity=equity_out, trades=trades, fees=book.fees_paid,
+                          funding=book.funding_paid, deactivated=strat.deactivated,
+                          cooldown_until=int(strat.cooldown_until))
 
 
 # ------------------------------------------------------------------ portfolio experiment

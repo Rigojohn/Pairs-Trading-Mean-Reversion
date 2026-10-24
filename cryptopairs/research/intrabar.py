@@ -3,7 +3,7 @@
 Why (2026-10-06): the bot checks entries only at the hourly close, so a Z that crosses the entry
 threshold inside the hour and comes back is never traded. Entering on every crossing risks two
 things: a spike that reverts within minutes (noise), and a spread that keeps running away
-(momentum into the stop-loss). The rules compared here (plan ~/.claude/plans/lazy-gliding-wozniak.md):
+(momentum into the stop-loss). The rules compared here:
 
     hourly      entries at the hourly close (bot B today)
     hourly_cap  the same, but no entry once |Z| went beyond threshold + 1.5 since it crossed

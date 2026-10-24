@@ -2,7 +2,7 @@
 # Copy the code to the server and (re)start the bot and the dashboard there.
 # The server keeps its state/, logs/ and data/: open positions survive an update.
 #
-#   ./deploy.sh              # server = "cryptobot" from ~/.ssh/config (DEPLOY.md, step 3)
+#   ./deploy.sh              # server = "cryptobot" from ~/.ssh/config
 #   ./deploy.sh root@1.2.3.4
 set -euo pipefail
 

@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
     command: ["dashboard", "--no-browser", "--address", "0.0.0.0", "--port", "8501"]
     # Reachable only from the server itself; open it from your computer through an SSH tunnel
-    # (DEPLOY.md). It has no password and its buttons control the bot: never publish "8501:8501".
+    # It has no password and its buttons control the bot: never publish "8501:8501".
     ports:
       - "127.0.0.1:8501:8501"
     volumes:

@@ -19,3 +19,9 @@ CryptoPairTrading-main.zip
 # Copied from cryptopairs/ui/vendor/ when the dashboard starts
 cryptopairs/static/lightweight-charts.standalone.production.js
 cryptopairs/static/ver/
+
+# Private notes and third-party reference code: kept locally, not published
+STATE.md
+DEPLOY.md
+notebooks/algorithm_explained.ipynb
+legacy/
